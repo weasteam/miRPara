@@ -1,0 +1,11313 @@
+#! /usr/bin/perl
+#	by Yonggan Wu (weasteam@gmail.com)
+#	by Simon Rayner (raynere@wh.iov.cn)
+#################################USE############################################
+use lib "/opt/perl/lib64/perl5/";
+use warnings;
+use strict;
+use Getopt::Long;
+use Algorithm::SVM;
+use Algorithm::SVM::DataSet;
+#use Parallel::Runner;
+#use Parallel::Loops;
+use Cwd qw(abs_path);
+##################################PARAMETER#####################################
+#parameters
+our $abname="unknown";#update to guess from file name
+our $species="overall";
+our $level=1;#default level 1
+our $prilengthlimit=60;
+our $version="5.1";
+our $foldlen=521;
+our $overlaplen=176;
+our $cutoff=0.8;#cutoff probabilities
+our $onlypmt=0;#only calculate the pmt valude instead of do further prediction
+#commonly used varials
+our %mirbase=mirbase();#mirbase blast
+our %lower=prilimit("lower");#prilower band
+our %upper=prilimit("upper");#priupper band
+our $svmmodel="";
+our %priseen=();
+#program/environment, check existance of UNAFold.pl and ct2out
+our $unafold=`which UNAFold.pl`;
+#our $unafold="/opt/bin/UNAFold.pl";
+$unafold=~s/\n//;
+if ($unafold eq ""){
+	die "Error: UNAFold.pl not found\n";
+}
+our $ct2out=`which ct2out`;
+#our $ct2out="/opt/bin/ct2out";
+$ct2out=~s/\n//;
+if ($ct2out eq ""){
+	die "Error: ct2out not found\n";
+}
+our $share=abs_path($0);#absolute path, can not replace with $0;
+#generally varials
+my %options;
+my $infile="";
+my $outfilerst;
+my $outfilepmt;
+my @tmp;
+my $tmp;
+my @pmt;
+my $cores=1;
+################################PROGROM START###################################
+GetOptions \%options, 'version|v' => sub { version('miRPara.pl') },
+						'help|h' => sub { usage() },
+						'name|n=s' => \$abname,
+						'species|s=s' => \$species,
+						'level|l=i'=>\$level,
+						'cutoff|c=f'=>\$cutoff,
+						'foldlength|f=i'=>\$foldlen,
+						'overlaplength|o=i'=>\$overlaplen,
+						'cores|t=i'=>\$cores,
+						'pmt'=>\$onlypmt,
+						'prilengthlimit|p=i' => \$prilengthlimit or die("Type miRPara.pl -h for help!\n");
+#################################data prepare###################################
+##infile
+$infile=shift or die("Error: data not specified\nRun 'miRPara.pl -h' for help\n");
+#change the abname
+if ($abname eq "unknown"){
+	$tmp=$infile;
+	$tmp=~s/[\s+\-\_\.]/,/g;
+	@tmp=split(",",$tmp);
+	$tmp=$tmp[0];
+	$tmp=~s/\//,/g;
+	@tmp=split(",",$tmp);
+	$abname=shift @tmp;
+}
+##outfiles
+if ($infile=~/\.pmt/){
+   $tmp=$infile;
+   $tmp=~s/\.pmt//;
+   $outfilerst="$tmp.out";
+}
+else{
+   $tmp=$infile;
+   $tmp=~s/\.fasta//;
+   $tmp=~s/\.fas//;
+   $outfilerst="$tmp.out";
+   $outfilepmt="$tmp.pmt";
+}
+##species
+$species=lc($species);
+if (not ($species=~/overall/ or $species=~/animal/ or $species=~/plant/ or $species=~/virus/)){#to check the species
+   print "Please provide right species name!!\nThe right species should be one of following: overall, animal, plant, virus\n";
+   exit;
+}
+##share directory
+$share=~s/miRPara.pl//;
+$share=~s/\n//g;
+$share=~s/\/$//;
+#$share.="\/";
+#foldlength and overlap length
+if ($foldlen<=$overlaplen){
+   die "Error: The cut length should longer than overlap length\n!";
+}
+if ($foldlen<=0 or $overlaplen<=0){
+   die "Error: The cut length or overlap length is not valid!\n";
+}
+#load the models
+if ($onlypmt ne 1){
+   #svm data
+   $svmmodel = new Algorithm::SVM(Model => "$share/models/$species\_$level.model") or die ("Error: Could not load models, please type miRPara.pl -h for help!\n");
+}
+##################################start#########################################
+#1	generate the sequences;
+#2	do split
+my $inputseq="";#the whole input sequences
+################################################################################
+#output the predict results
+open (OUT,">$outfilerst");
+print OUT qq{#miRNA results predicted by miRPara$version
+#By Yonggan Wu and Simon Rayner
+#Report bugs to Yonggan Wu (weasteam\@gmail.com) or Dr. Simon Rayner (sraynere\@wh.iov.cn)
+#Bioinformatics Group, State Key Laboratory of Virology, Wuhan Institute of Virology, Chinese Academy of Sciences.
+#The Department of Biological Sciences, Texas Tech University.
+#miRPara online: http://www.whiov.ac.cn/bioinformatics/mirpara
+#level: $level
+#cutoff: $cutoff
+#
+#priid\tpriseq\tpristart\tmiid\tmiseq\tmistart\tstrand\tSVM_probability\tmiRBase13.0
+};
+################################################################################
+#my $pl = Parallel::Loops->new($cores);
+#pmt file prediction
+if ($infile =~ /\.pmt/){
+   my %para;
+   my $dat;
+   my @filepmt;
+   open (IN,$infile);
+   while (<IN>){
+	  $_=~s/\n//;
+	  if ($_=~/^#/){
+			$_=~s/#//;
+			@filepmt=split("\t",$_)
+	  }
+	  else{
+			$_=~s/\n//;
+			%para=();
+			@tmp=split("\t",$_);
+			@pmt=@filepmt;
+			$tmp=@pmt;
+			for ($dat=1;$dat<=$tmp;$dat+=1){
+			   $para{$pmt[$dat-1]}=$tmp[$dat-1];
+			}
+			##########################################################################
+			#parameter prediction
+			#$pm->start and next; # do the fork
+			print "Predicting for $para{'miid'}...";
+			predict(%para);
+			#$pm->finish;
+	  }
+   }
+   close IN;
+   #$pm->wait_all_children;
+}
+elsif ($infile =~ /\.fa/){
+   open (PMT,">$outfilepmt");
+   #print the titile of parameter
+   @pmt=pmt("all");
+   $tmp=shift @pmt;
+   print PMT "#$tmp";
+   foreach (@pmt){
+	  print PMT "\t$_";
+   }
+   print PMT "\n";
+   open (IN,$infile) or die ("Error: $infile does not exist!\n");
+   my $fastatitle;
+   while (<IN>){
+	  $_=~s/[\n\r]//g;
+	  my $currentline=$_;
+	  if ($currentline=~/^>/){
+		 if ($inputseq ne ""){
+			#######################################################################
+			#split the whole sequence into small fragments
+			#$pm->start and next; # do the fork
+	#		prun(
+	#			[ \&dosplit, ($fastatitle,$inputseq) ],
+				dosplit($fastatitle,$inputseq),
+	#		) or die( Parallel::Simple::errplus() );
+			#$pm->finish;
+		 }
+		 $tmp=$currentline;
+		 $tmp=~s/>//;
+		 $tmp=~s/[\s\|]/,/g;
+		 @tmp=split(",",$tmp);
+		 $fastatitle=$tmp[0];
+		 $inputseq="";
+		 %priseen=();
+	  }
+	  else{
+		 $_=~s/\s+//g;
+		 $_=lc($_);
+		 $_=~s/t/u/g;
+		 $inputseq.=$_;
+	  }
+   }
+   #my %inputseq;
+   #while (<IN>){
+   #		$_=~s/\r//;
+   #		$_=~s/\n//;
+   #		if ($_=~/^>/){
+   #			$tmp=$_;
+	# 		$tmp=~s/>//;
+	# 		$tmp=~s/[\s\|]/,/g;
+	#		@tmp=split(",",$tmp);
+	#		$tmp=$tmp[0];
+   	#	}
+   	#	else{
+   	#		$inputseq{$tmp}.=$_;
+   	#	}
+   #}
+   close IN;
+   #my @tmp=keys %inputseq;
+   #my $runner = Parallel::Runner->new($cores);
+   #foreach (@tmp){
+   #		$runner->run( sub { dosplit($_,$inputseq{$_}) } );
+   #}
+	#$pl->foreach(\@tmp, sub {
+     #   dosplit($_,$inputseq{$_})
+    #});
+   if ($inputseq ne ""){
+		##########################################################################
+		#split the whole sequence into small fragments
+		#$pm->start and next; # do the fork
+		dosplit($fastatitle,$inputseq);
+		#$pm->finish;
+   }
+   close PMT;
+   #$pm->wait_all_children;
+}#whether only calculate the parameter
+else{
+   die "Error: data format unrecongnized,\nRun 'miRPara.pl -h' for help\n";
+}
+close OUT;
+#release the cores
+#if ($cores>1){
+	#my @tmp=keys(%thr);
+	#foreach (@tmp){
+	#	$thr{$_} ->join;
+	#}
+#}
+#calculate the parameters only
+if ($onlypmt eq 1){
+   system "rm $outfilerst";
+}
+print "\nAll Done.\n";
+##################web serve#####################################################
+#system "tar zcf miRPara_result.tar.gz ./*";#web serve
+##################STOP HERE#####################################################
+sub usage () {
+    print <<EOF;
+Usage: miRPara.pl [Options] file [File]
+
+Options:
+-v, --version
+-h, --help
+-n, --name=<abbreviated name of the species>
+-s, --species=<overall, animal, plant or virus> (defaults as overall)
+-c, --cutoff=<the cutoff to svm prediction probabilities> (defaults to 0.8)
+-l, --Levels=<1..20>(defaults to 1)
+-p, --prilengthlimit=<limit to the pri-miRNA length> (defaults to 60)
+-f, --foldlength=<The length to be split for folding> (defaults to 500)
+-o, --overlaplength=<The overlap length of two nearby splited fragments> (defaults to 150)
+-t, --cores=<No. of cores> (defaults to 1)
+--pmt, --Only calculate the parameters without further prediction
+
+File (one of following):
+*.fasta, --Only fasta format sequences were allowed
+*.pmt, --Repredict from the parameter files
+
+Report bugs to Yonggan Wu (weasteam\@gmail.com) or Dr. Simon Rayner (raynere\@wh.iov.cn)
+
+Homepage: http://www.whiov.ac.cn/bioinformatics/mirpara
+Google Project: http://code.google.com/p/mirpara/
+Facebook: https://www.facebook.com/mirpara2009
+
+EOF
+    exit;
+}
+sub version ($) {
+	print qq {
+$_[0] (miRPara) $version
+
+By Yonggan Wu (weasteam\@gmail.com) and Simon Rayner (raynere\@wh.iov.cn)
+Copyright (C) 2009
+Wuhan Institute of Virology, Chinese Academic of Science. Wuhan, 430071, China
+Department of Biological Sciences, Texas Tech University, Texas, 33409, USA
+
+Homepage: http://www.whiov.ac.cn/bioinformatics/mirpara
+Google Project: http://code.google.com/p/mirpara/
+Facebook: https://www.facebook.com/mirpara2009
+
+};
+    exit;
+}
+sub dosplit{
+   #1	receive one input sequences and its name
+   #2	split it according to the length
+   my ($title,$seq)=@_;#input the file
+   my @pstart;#the array of start positions
+   my @pend;#$the array of end positions
+   my $len=length($seq);
+   my $tmp;
+   my $splitseq;
+   my $priseq;
+   my $rand1;
+   my $rand2;
+   my @tmp;
+   my $line;
+   my $mfe;
+   my @str;
+   my $splitnumber;
+   #generate the start and end positions
+   $pstart[0]=1;
+   $pend[0]=$foldlen;
+   $tmp=1;
+   while ($pend[$tmp-1]<=$len){
+	  $pstart[$tmp]=$pstart[$tmp-1]+($foldlen-$overlaplen);
+	  $pend[$tmp]=$pend[$tmp-1]+($foldlen-$overlaplen);
+	  $tmp+=1;
+   }
+   $tmp-=1;
+   $pstart[$tmp]=$pstart[$tmp-1]+($foldlen-$overlaplen);
+   $pend[$tmp]=$len;
+   if ($len<=$foldlen){
+	  @pstart=();
+	  @pend=();
+	  $pstart[0]=1;
+	  $pend[0]=$len;
+   }
+   #############################################################################
+   #fold the splited fragments for primary miRNAs
+   $splitnumber=@pstart;
+   my $i;
+   foreach ($i=1;$i<=$splitnumber;$i+=1){
+	  $splitseq=substr($seq,$pstart[$i-1]-1,$pend[$i-1]-$pstart[$i-1]+1);
+	  print "RNAFolding for $title\_$pstart[$i-1]\_$pend[$i-1]...";
+	  $rand1=dofold($splitseq);#do UNAfolding
+	  print " done\n";
+	  if ($rand1 ne 0){
+		 open (PRISTR,"$rand1.str");
+		 $line=1;
+		 @tmp=();
+		 while (<PRISTR>){
+			next if /^Sequence/;
+			next if /^Bases/;
+			next if /dG/;
+			$_=~s/\n//;
+			$tmp[$line]=$_;
+			if ($line eq 7){
+			   $line=0;
+			   #generate the secondary structure
+			   #the folding structure multiple check
+			   #################################################################
+			   $tmp=hairpin2seq(cutstr(@tmp[3..6]));
+			   uniquestr:
+			   if (length($tmp)>=$prilengthlimit){
+				  $rand2=dofold($tmp);
+				  ($mfe,$priseq,@str)=longeststrtrim($rand2);
+				  if (length($priseq) ne length($tmp)){
+					 $tmp=$priseq;
+					 goto uniquestr;
+				  }
+				  ##############################################################
+				  #generate the candidates
+				  if (not exists $priseen{$priseq}){#check the duplicate
+					 $priseen{$priseq}=1;
+					 $tmp=$pstart[$i-1]+index($splitseq,$priseq);
+					 candidates("$title\_$tmp",$priseq,$mfe,@str);
+				  }
+			   }
+			}
+			$line+=1;
+		 }
+		 close PRISTR;
+		 system "rm $rand1*";
+	  }
+   }
+}
+sub dofold{
+   #	to generate the secondary structure
+   #1	received a title and a cuted ~500 seq;
+   #2	do unafuld and return a str
+   my ($seq)=@_;
+   my $rand=int(rand(99999999));
+   open (FOLD,">$rand");
+   print FOLD ">$rand\n$seq\n";
+   close FOLD;
+   system "$unafold $rand > $rand.log";
+   if (-e "$rand\_1.ct"){
+	  system "$ct2out <$rand\_1.ct> $rand.str";#run ct2out
+	  return $rand;
+   }
+   else{
+	  system "rm $rand*";
+	  return "0";
+   }
+}
+sub hairpin2seq {#conver the second structure into a line
+   #The hairpin2seq was used to generate a seq from second str
+   #	receive 4 str
+   #	return one seq
+   my (@s)=@_;
+   my $seq;#for the sequence
+   my $upperseq;#for the upper strand
+   my $lowerseq;#for the lower strand
+   my $m=0;
+   while ($m<=(length($s[1])-1)){
+	  $upperseq.=substr($s[0],$m,1).substr($s[1],$m,1);#get the seq
+	  $lowerseq.=substr($s[2],-($m+1),1).substr($s[3],-($m+1),1);
+	  $m+=1;
+   }
+   $seq=$upperseq.$lowerseq;
+   $seq=~ s/[\\\-\.]//g;#get rid of \\
+   $seq=~ s/\s+//g;#get rid of black
+   return $seq;
+}
+sub cutstr{
+   #generate the proper strs, without budding stem;
+   #receive 4 str
+   #return 4 str
+   #hairpin length limit
+   my $hairpinlength=60;
+   my (@seq)=@_;
+   while ($seq[3]=~/\\/){
+	  $seq[3]=substr($seq[3],index($seq[3],"\\")+1);
+   }
+   $seq[3]=~s/^\s+//;
+   if (length($seq[3])>$hairpinlength){
+		$seq[3]=substr($seq[3],-$hairpinlength);
+   }
+   $seq[0]=substr($seq[0],-length($seq[3]));
+   $seq[1]=substr($seq[1],-length($seq[3]));
+   $seq[2]=substr($seq[2],-length($seq[3]));
+   return @seq;
+}
+sub longeststrtrim{
+   #generate the longest hairpin from the given str
+   #receive unafold random number
+   #return 4 str and $mfe, and primary sequences
+   my ($rand)=@_;
+   my $mfe;
+   my $line=1;
+   my @tmp;
+   my @seq;
+   my $tmp;
+   my %str;
+   my %pri;
+   open (LONGSTR,"$rand.str");
+   while (<LONGSTR>){
+	  next if /^Sequence/;
+	  next if /^Bases/;
+	  $_=~s/\n//;
+	  if ($_=~/dG/){
+		 $mfe=substr($_,index($_,"=")+1);
+		 $mfe=~s/^\s+//g;#delete the blacks
+		 $mfe=substr($mfe,0,index($mfe,"\t"));
+		 next;
+	  }
+	  $tmp[$line]=$_;
+	  if ($line eq 7){
+		 $line=0;
+		 @seq=cutstr(@tmp[3..6]);
+		 $tmp=hairpin2seq(@seq);
+		 $str{length($tmp)}=join(",",@seq);
+		 $pri{length($tmp)}=$tmp;
+	  }
+	  $line+=1
+   }
+   close LONGSTR;
+   @tmp=sort { $b <=> $a;} (keys(%str));
+   @seq=split(",",$str{$tmp[0]});
+   system "rm $rand*";
+   return ($mfe,$pri{$tmp[0]},@seq);
+}
+sub candidates{
+   #	to generate the posssible candidates
+   #	receive title $mfe,$priseq,@str
+   #	process for parameters;
+   my ($title,$seq,$mfe,@str)=@_;
+   my %para;
+   my @milen;
+   my $rand;
+   my @tmp;
+   my $tmp;
+   my @dat;
+   my $dat;
+   #priid,priseq,prilength,budding stem
+   $para{'priid'}=$title;#_, incase same to the real name.
+   $para{'priseq'}=$seq;
+   $para{'prilength'}=length($para{'priseq'});
+   $para{'buddingstem'}=0;#0 refer to no
+   $para{'primfe'}=$mfe;
+   ($para{'pristr_1'},$para{'pristr_2'},$para{'pristr_3'},$para{'pristr_4'})=@str;
+   #create candidates 20-24
+   for ($para{'mistart'}=1;$para{'mistart'}<=$para{'prilength'};$para{'mistart'}+=1){
+	  @milen=(20..24);
+	  foreach (@milen){
+		 #milength,miend
+		 $para{'milength'}=$_;
+		 #----------------------------------------------------------------------
+		 #debug
+		 #$para{'mistart'}=17;
+		 #$para{'milength'}=21;
+		 #----------------------------------------------------------------------
+		 $para{'miend'}=$para{'mistart'}+$para{'milength'}-1;
+		 if ($para{'miend'}<=$para{'prilength'}){#incase out of range
+			#miseq
+			$para{'miseq'}=uc(substr($para{'priseq'},$para{'mistart'}-1,$para{'milength'}));
+			#miid
+			$para{'miid'}="$para{'priid'}\_$para{'mistart'}\_$para{'milength'}";
+			#print "$para{'miid'}\n";
+			#priseq
+			$para{'priseq'}=lc(substr($para{'priseq'},0,$para{'mistart'}-1)).uc(substr($para{'priseq'},$para{'mistart'}-1,$para{'milength'})).lc(substr($para{'priseq'},$para{'miend'}));
+			#basal segment
+			$tmp=$para{'pristr_1'};
+			if ($tmp=~/^\s/){
+			   $para{'length_basalsegment'}=0;
+			}
+			else{
+			   $tmp=~s/\s+/,/g;
+			   @tmp=split(",",$tmp);
+			   $para{'length_basalsegment'}=length($tmp[0]);
+			}
+			#strand
+			$tmp=join("",$para{'pristr_1'},$para{'pristr_2'});
+			$tmp=~s/[\s\\\.-]+//g;
+			if ($para{'miend'} <= length($tmp)){
+			   $para{'strand'}='5';
+			}
+			elsif($para{'mistart'} > length($tmp)){
+			   $para{'strand'}='3';
+			}
+			else{
+			   $para{'strand'}=0;#across the terminal loop
+			}
+			if ($para{'strand'} ne 0){
+			   #upperstart
+			   @tmp=();
+			   my $primary;
+			   if ($para{'strand'} eq 5){
+				  $primary=$para{'mistart'}-1;
+				  @tmp[1,2]=($para{'pristr_1'},$para{'pristr_2'});
+			   }
+			   else{
+				  $primary=$para{'prilength'}-$para{'miend'};
+				  @tmp[1,2]=($para{'pristr_3'},$para{'pristr_4'});
+			   }
+			   $para{'upperstart'}=$primary;
+			   $tmp=$para{'pristr_1'};
+			   until (length($tmp) eq $primary){
+				  $tmp=substr($tmp[1],0,$para{'upperstart'}).substr($tmp[2],0,$para{'upperstart'});
+				  $tmp=~s/[\-\s]+//g;
+				  $para{'upperstart'}+=1;
+			   }
+			   #upperend
+			   if ($para{'strand'} eq 5){
+				  $primary=$para{'miend'};
+				  @tmp[1,2]=($para{'pristr_1'},$para{'pristr_2'});
+			   }
+			   else{
+				  $primary=$para{'prilength'}-$para{'mistart'}+1;
+				  @tmp[1,2]=($para{'pristr_3'},$para{'pristr_4'});
+			   }
+			   $para{'upperend'}=$primary;
+			   $tmp=$para{'pristr_1'};
+			   until (length($tmp) eq $primary){
+				  $tmp=substr($tmp[1],0,$para{'upperend'}).substr($tmp[2],0,$para{'upperend'});
+				  $tmp=~s/[\-\s]+//g;
+				  $para{'upperend'}+=1;
+			   }
+			   $para{'upperend'}-=1;
+			   #the second structure of the pri-miRNA
+			   if ($para{'strand'} eq 5){
+				  $para{'pristr_3'}=lc($para{'pristr_3'});
+			      $para{'pristr_4'}=lc($para{'pristr_4'});
+			      $para{'pristr_1'}=lc(substr($para{'pristr_1'},0,$para{'upperstart'}-1)).uc(substr($para{'pristr_1'},$para{'upperstart'}-1,$para{'upperend'}-$para{'upperstart'}+1)).lc(substr($para{'pristr_1'},$para{'upperend'}));
+			      $para{'pristr_2'}=lc(substr($para{'pristr_2'},0,$para{'upperstart'}-1)).uc(substr($para{'pristr_2'},$para{'upperstart'}-1,$para{'upperend'}-$para{'upperstart'}+1)).lc(substr($para{'pristr_2'},$para{'upperend'}));
+			   }
+			   else{
+				  $para{'pristr_1'}=lc($para{'pristr_1'});
+				  $para{'pristr_2'}=lc($para{'pristr_2'});
+				  $para{'pristr_3'}=lc(substr($para{'pristr_3'},0,$para{'upperstart'}-1)).uc(substr($para{'pristr_3'},$para{'upperstart'}-1,$para{'upperend'}-$para{'upperstart'}+1)).lc(substr($para{'pristr_3'},$para{'upperend'}));
+				  $para{'pristr_4'}=lc(substr($para{'pristr_4'},0,$para{'upperstart'}-1)).uc(substr($para{'pristr_4'},$para{'upperstart'}-1,$para{'upperend'}-$para{'upperstart'}+1)).lc(substr($para{'pristr_4'},$para{'upperend'}));
+			   }
+			   #terminal loop
+			   $tmp="";
+			   @tmp=($para{'pristr_1'},$para{'pristr_2'},$para{'pristr_3'},$para{'pristr_4'});
+			   foreach (@tmp){
+				  $_=~s/\s+$//;
+				  $_=~s/\s+/,/g;
+				  @dat=split(",",$_);
+				  $tmp.=pop @dat;
+			   }
+			   $tmp=~s/\\//;
+			   $para{'length_terminalloop'}=length($tmp);
+			   #pre
+			   @tmp=($para{'pristr_1'},$para{'pristr_2'},$para{'pristr_3'},$para{'pristr_4'});
+			   $tmp=length($para{'pristr_1'});
+			   foreach (@tmp){
+				  $_=~s/[AUCGT]/N/g;
+				  if (index($_,"N")<$tmp and index($_,"N") ne -1){
+					 $tmp=index($_,"N");
+				  }
+			   }
+			   #prestr
+			   $para{'prestr_1'}=substr($para{'pristr_1'},$tmp);
+			   $para{'prestr_2'}=substr($para{'pristr_2'},$tmp);
+			   $para{'prestr_3'}=substr($para{'pristr_3'},$tmp);
+			   $para{'prestr_4'}=substr($para{'pristr_4'},$tmp);
+			   #pre seq
+			   $para{'preseq'}=hairpin2seq($para{'prestr_1'},$para{'prestr_2'},$para{'prestr_3'},$para{'prestr_4'});
+			   $para{'prelength'}=length($para{'preseq'});
+			   #premfe
+			   $para{'premfe'}=$para{'primfe'}*($para{'prelength'}/$para{'prilength'});
+			   #lower str
+			   $dat=$tmp-$para{'length_basalsegment'};
+			   if ($dat <0){
+				  $dat=0
+			   }
+			   $para{'lowerstr_1'}=substr($para{'pristr_1'},$para{'length_basalsegment'},$dat);
+			   $para{'lowerstr_2'}=substr($para{'pristr_2'},$para{'length_basalsegment'},$dat);
+			   $para{'lowerstr_3'}=substr($para{'pristr_3'},$para{'length_basalsegment'},$dat);
+			   $para{'lowerstr_4'}=substr($para{'pristr_4'},$para{'length_basalsegment'},$dat);
+			   #mi
+			   @tmp=($para{'prestr_1'},$para{'prestr_2'},$para{'prestr_3'},$para{'prestr_4'});
+			   $tmp=length($para{'prestr_1'});
+			   foreach (@tmp){
+				  $_=~s/[atcgu]/n/g;
+				  $_=~s/[AUCGT]/N/g;
+				  if (index($_,"n")<$tmp and $_=~/N/){
+					 $tmp=index($_,"n");
+				  }
+			   }
+			   #mistr
+			   $para{'mistr_1'}=substr($para{'prestr_1'},0,$tmp);
+			   $para{'mistr_2'}=substr($para{'prestr_2'},0,$tmp);
+			   $para{'mistr_3'}=substr($para{'prestr_3'},0,$tmp);
+			   $para{'mistr_4'}=substr($para{'prestr_4'},0,$tmp);
+			   #top str
+			   $dat=length($para{'prestr_1'})-length($para{'mistr_1'})-int($para{'length_terminalloop'}/2+0.1);
+			   $para{'topstr_1'}=substr($para{'prestr_1'},$tmp,$dat);
+			   $para{'topstr_2'}=substr($para{'prestr_2'},$tmp,$dat);
+			   $para{'topstr_3'}=substr($para{'prestr_3'},$tmp,$dat);
+			   $para{'topstr_4'}=substr($para{'prestr_4'},$tmp,$dat);
+			   #str length
+			   $para{'length_upperstem'}=length($para{'mistr_2'});
+			   $para{'length_topstem'}=length($para{'topstr_2'});
+			   $para{'length_lowerstem'}=length($para{'lowerstr_2'});
+			   #gc content
+			   $para{'prigc'}=gc($para{'priseq'});#prigc
+			   $para{'pregc'}=gc($para{'preseq'});#pregc
+			   $para{'migc'}=gc($para{'miseq'});#migc
+			   #pairs
+			   $para{'pripairs'}=pairs($para{'pristr_2'},'loop');
+			   $para{'prepairs'}=pairs($para{'prestr_2'},'loop');
+			   $para{'mipairs'}=pairs($para{'mistr_2'});
+			   #gu
+			   $para{'prigu'}=gu($para{'pristr_2'},$para{'pristr_3'},'loop');
+			   $para{'pregu'}=gu($para{'prestr_2'},$para{'prestr_3'},'loop');
+			   $para{'migu'}=gu($para{'mistr_2'},$para{'mistr_3'});
+			   #ntcontent
+			   $para{'printcontent_a'}=ntcontent($para{'priseq'},'a');
+			   $para{'printcontent_u'}=ntcontent($para{'priseq'},'u');
+			   $para{'printcontent_c'}=ntcontent($para{'priseq'},'c');
+			   $para{'printcontent_g'}=ntcontent($para{'priseq'},'g');
+			   $para{'prentcontent_a'}=ntcontent($para{'preseq'},'a');
+			   $para{'prentcontent_u'}=ntcontent($para{'preseq'},'u');
+			   $para{'prentcontent_c'}=ntcontent($para{'preseq'},'c');
+			   $para{'prentcontent_g'}=ntcontent($para{'preseq'},'g');
+			   $para{'mintcontent_a'}=ntcontent($para{'miseq'},'a');
+			   $para{'mintcontent_u'}=ntcontent($para{'miseq'},'u');
+			   $para{'mintcontent_c'}=ntcontent($para{'miseq'},'c');
+			   $para{'mintcontent_g'}=ntcontent($para{'miseq'},'g');
+			   #firstbase
+			   $para{'firstbase'}=uc(substr($para{'miseq'},0,1));
+			   #pribulge#biggestbulge#bulge, number, type,size,position
+			   ($para{'priinternalloopnumber'},$para{'priinternalloop'})=bulge(substr($para{'pristr_1'},$para{'length_basalsegment'}),-1);
+			   ($para{'preinternalloopnumber'},$para{'preinternalloop'})=bulge($para{'prestr_1'},-1);
+			   ($para{'miinternalloopnumber'},$para{'miinternalloop'})=bulge($para{'mistr_1'},0);
+			   ($para{'internalloopnumber_lowerstem'},$para{'internalloop_lowerstem'})=bulge($para{'lowerstr_1'},0);
+			   ($para{'internalloopnumber_topstem'},$para{'internalloop_topstem'})=bulge($para{'topstr_1'},0);
+			   #unpairedbases,does not include the terminal loop, 1 refer to terminal loop, 0 refer no ternimal loop
+			   $para{'priunpairedbases'}=unpairedbases(substr($para{'pristr_1'},$para{'length_basalsegment'}),substr($para{'pristr_4'},$para{'length_basalsegment'}),1);
+			   $para{'preunpairedbases'}=unpairedbases($para{'prestr_1'},$para{'prestr_4'},1);
+			   $para{'miunpairedbases'}=unpairedbases($para{'mistr_1'},$para{'mistr_4'},0);
+			   $para{'unpairedbases_lowerstem'}=unpairedbases($para{'lowerstr_1'},$para{'lowerstr_4'},0);
+			   $para{'unpairedbases_topstem'}=unpairedbases($para{'topstr_1'},$para{'topstr_4'},0);
+			   #unpairedrate, not include terminal loop, the method good for budding stems--does not count budding stem
+			   if (($para{'prilength'}-$para{'length_terminalloop'}) ne 0){
+			   		$para{'priunpairedrate'}=sprintf '%4.4f', $para{'priunpairedbases'}/($para{'prilength'}-$para{'length_terminalloop'});
+			   }
+			   else{
+			   		$para{'priunpairedrate'}=-1;
+			   }
+			   if (($para{'prelength'}-$para{'length_terminalloop'}) ne 0){
+			   		$para{'preunpairedrate'}=sprintf '%4.4f', $para{'preunpairedbases'}/($para{'prelength'}-$para{'length_terminalloop'});
+			   }
+			   else{
+			   		$para{'preunpairedrate'}=-1;
+			   }
+			   $tmp=$para{'mistr_1'}.$para{'mistr_2'}.$para{'mistr_3'}.$para{'mistr_4'};
+			   $tmp=~s/[\s\-\.\\]+//g;
+			   $para{'miunpairedrate'}=sprintf '%4.4f', $para{'miunpairedbases'}/length($tmp);
+			   $tmp=$para{'lowerstr_1'}.$para{'lowerstr_2'}.$para{'lowerstr_3'}.$para{'lowerstr_4'};
+			   $tmp=~s/[\s\-\.\\]+//g;
+			   if (length($tmp) ne 0){
+				  $para{'unpairedrate_lowerstem'}=sprintf '%4.4f', $para{'unpairedbases_lowerstem'}/length($tmp);
+			   }
+			   else{
+				  $para{'unpairedrate_lowerstem'}=-1;
+			   }
+			   $tmp=$para{'topstr_1'}.$para{'topstr_2'}.$para{'topstr_3'}.$para{'topstr_4'};
+			   $tmp=~s/[\s\-\.\\]+//g;
+			   if (length($tmp) ne 0){
+				  $para{'unpairedrate_topstem'}=sprintf '%4.4f', $para{'unpairedbases_topstem'}/length($tmp);
+			   }
+			   else{
+				  $para{'unpairedrate_topstem'}=-1;
+			   }
+			   #stability
+			   my $seq1;
+			   my $seq2;
+			   if ($para{'strand'} eq '5'){
+				  $seq1=$para{'mistr_1'};
+				  $seq2=$para{'mistr_2'};
+			   }
+			   else{
+				  $seq1=$para{'mistr_3'};
+				  $seq2=$para{'mistr_4'};
+			   }
+			   my $len1=4;#left
+			   my $len2=4;#right
+			   my $m="";
+			   my $n="";
+			   until((length($m)+length($n)) eq 4){#get the left four nts
+				  $m=substr($seq1,0,$len1);
+				  $n=substr($seq2,0,$len1);
+				  $m=~s/[\s\-\.\\]+//g;
+				  $n=~s/[\s\-\.\\]+//g;
+				  $len1+=1;
+			   }
+			   $len1-=1;
+			   $m="";
+			   $n="";
+			   until((length($m)+length($n)) eq 4){#get the right four nts
+				  $m=substr($seq1,-$len2,$len2);
+				  $n=substr($seq2,-$len2,$len2);
+				  $m=~s/[\s\-\.\\]+//g;
+				  $n=~s/[\s\-\.\\]+//g;
+				  $len2+=1;
+			   }
+			   $len2-=1;
+			   if ($para{'strand'} eq '5'){
+				  $seq1=lc(join("",substr($para{'mistr_2'},0,$len1),substr($para{'mistr_3'},0,$len1)));
+				  $seq2=lc(join("",substr($para{'mistr_2'},-$len2,$len2),substr($para{'mistr_3'},-$len2,$len2)));
+			   }
+			   else{
+				  $seq1=lc(join("",substr($para{'mistr_2'},-$len2,$len2),substr($para{'mistr_3'},-$len2,$len2)));
+				  $seq2=lc(join("",substr($para{'mistr_2'},0,$len1),substr($para{'mistr_3'},0,$len1)));
+			   }
+			   $seq1=~s/[\s\-\.\\]+//g;
+			   $seq1=~ s/c/zz/g;
+			   $seq2=~s/[\s\-\.\\]+//g;
+			   $seq2=~ s/c/zz/g;
+			   if (length($seq2) ne 0){#incase $seq2 eq nothing
+					$para{'stability'}=sprintf '%.2f',length($seq1)/length($seq2);
+			   }
+			   else{
+					if (length($seq1) eq 0){
+						$para{'stability'}=1.00;
+					}
+					else{
+						$para{'stability'}=length($seq1)+1;#stabily, if seq2 eq nothing, stability eq to $seq1's length plus one.
+					}
+			   }
+			   #overhang
+			   $tmp="";
+			   $m=1;
+			   while ((length($tmp) < 2)  and ($para{'upperend'}+$m)<=length($para{'pristr_3'})){
+				  if ($para{'strand'} eq "5"){#generate the two nt
+					 $tmp=join("",substr($para{'pristr_3'},$para{'upperend'},$m),
+							 substr($para{'pristr_4'},$para{'upperend'},$m));
+				  }
+				  else{
+					 $tmp=join("",substr($para{'pristr_1'},$para{'upperstart'}-$m-1,$m),
+							 substr($para{'pristr_2'},$para{'upperstart'}-$m-1,$m));
+				  }
+				  $tmp=~ s/[\s\\-]+//g;
+				  $m++;
+			   }
+			   if ($tmp eq ""){#no overhang
+				  $para{'penultimateposition'}="NULL";
+				  $para{'terminalnucleotide'}="NULL";
+			   }
+			   if (length($tmp) eq 1){#one overhang
+				  $para{'penultimateposition'}=$tmp;
+				  $para{'terminalnucleotide'}="NULL";
+			   }
+			   if (length($tmp) eq 2){#two overhang
+				  if ($para{'strand'} eq "5"){
+					 $para{'penultimateposition'}=substr($tmp,0,1);
+					 $para{'terminalnucleotide'}=substr($tmp,1,1);
+				  }
+				  else{
+					 $para{'penultimateposition'}=substr($tmp,1,1);
+					 $para{'terminalnucleotide'}=substr($tmp,0,1);
+				  }
+			   }
+			   $para{'penultimateposition'}=uc($para{'penultimateposition'});
+			   $para{'terminalnucleotide'}=uc($para{'terminalnucleotide'});
+			   #################################################################
+			   #pripredict
+			   my @pmt=pmt("range");
+			   my $prirst;
+			   foreach (@pmt){
+				  $tmp=$_;
+				  $prirst=pricompare($para{$tmp},$lower{$tmp},$upper{$tmp});
+				  if ($prirst eq 0){
+					 goto pripredictfail;
+				  }
+			   }
+			   #################################################################
+			   #output the parameters
+			   @pmt=pmt("all");
+			   print PMT "$para{$pmt[0]}";
+			   shift @pmt;
+			   foreach (@pmt){
+				  print PMT "\t$para{$_}";
+			   }
+			   print PMT "\n";
+			   #################################################################
+			   #miRNA prediction
+			   if ($onlypmt ne 1){#calculate the parameter only without prediction
+				  print "Predicting for $para{'miid'}...";
+				  predict(%para);
+			   }
+			   pripredictfail:
+			}#end if ($para{'strand'} ne 0)
+		 }#end of if ($para{'miend'}<=$para{'prilength'}){#incase out of range
+	  }#end of foreach (@milen)
+   }#end of for ($para{'mistart'}=1;$para{'mistart'}<=length($para{'priseq'});$para{'mistart'}+=1)
+}#sub
+sub gc{#parameter
+	#===========The gc was used to generate gc content of given seq
+	my $seq;#receive the sequences
+	my $tmp;#tmp string
+	my $gc;
+	($seq)=@_;
+	$tmp=lc($seq);
+	$tmp=~s/[au]+//g;
+	$gc=sprintf '%4.4f', length($tmp)/length($seq);#prigc
+	return $gc;
+}
+sub pairs{#parameter
+	#===========The pairs was used to generate the number of pairs of second str
+	my $seq;
+	my $loop;
+	my $pairs;
+	($seq,$loop)=@_;
+	if (defined $loop){
+		if (lc($loop) eq "loop"){
+			chop($seq);
+		}
+	}
+	$seq=~ s/\s+//g;
+	$pairs=length($seq);
+	return $pairs;
+}
+sub gu{#parameter
+	#===========The gu was used to generate the number of GU wobbles
+	my $seq1;
+	my $seq2;
+	my $tmp;#tmp string
+	my $loop;
+	my $gu;
+	my $u;
+	my $a;
+	($seq1,$seq2,$loop)=@_;
+	if (defined $loop){
+		if (lc($loop) eq "loop"){
+			chop($seq1);
+			chop($seq2);
+		}
+	}
+	$tmp=join("",$seq1,$seq2);
+	$tmp=~ s/\s+//g;
+	$u=lc($tmp);
+	$u=~ s/[acg]+//g;
+	$a=lc($tmp);
+	$a=~ s/[ucg]+//g;
+	$gu=length($u)-length($a);
+	return $gu;
+}
+sub ntcontent{#parameter
+   #===========The ntcontent was used to generate the nt content of four nts
+   my $seq;
+   my $tmp;
+   my $nt;
+   my $ntcontent;
+   ($seq,$nt)=@_;
+   $tmp=lc($seq);
+   $nt=lc($nt);
+   $tmp=~ s/[$nt]+//g;
+   $ntcontent=sprintf '%4.4f', (length($seq)-length($tmp))/length($seq);
+   return $ntcontent;
+}
+sub bulge{#parameter
+   #the bulge was used to generate the number, the biggest size
+   #	receive the first
+   #	report the number of bulges and the biggest internal loop
+   my ($seq,$del)=@_;
+   my $number;
+   my $size=0;
+   my @tmp;
+   my $tmp;;
+   $seq=~s/\s+$//;
+   $seq=~s/^\s+//;
+   $seq=~s/\s+/,/g;
+   @tmp=split(",",$seq);
+   if ($del eq -1){
+	  pop @tmp;
+   }
+   #number
+   $number=@tmp;
+   if ($number ne 0){#in case no any bulge
+	  #size
+	  foreach (@tmp){
+		 if (length($_)>$size){
+			$size=length($_);
+		 }
+	  }
+   }
+   else{
+	   $number=0;
+	   $size=-1;
+   }
+   return $number,$size;
+}
+sub unpairedbases{#parameter
+	#===========The unpairedbases was used to generate the size of unpaired bases
+	#does not include the terminal loop
+	my ($seq1,$seq2,$loop)=@_;
+	my $tmp;
+	my @seq;
+	my @tmp;
+	if ($loop eq 1){
+	  @seq=($seq1,$seq2);
+	  foreach (@seq){
+		 $_=~s/\s+$//g;
+		 $_=~s/^\s+//g;
+		 $_=~s/\s+/,/g;
+		 @tmp=split(",",$_);
+		 pop (@tmp);
+		 $_=join("",@tmp);
+	  }
+	  $seq1=$seq[0];
+	  $seq2=$seq[1];
+	}
+	
+	$tmp=$seq1.$seq2;
+	$tmp=~s/[\s\-]+//g;
+	return length($tmp)
+}
+sub nt2number{
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>INTRODUCTION<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   #===========The nt2number was used to translate the nt to ACC number
+   #===========Usage: nt2number(nt)
+   #===========The number of acc will be return
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>END<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   my $value;
+   ($value)=@_;
+   $value=lc($value);
+   if ($value eq "null"){
+	  $value="-1";
+   }
+   elsif ($value eq ""){
+	  $value="";#if nothing
+   }
+   elsif ($value eq "a"){
+	  $value="1";
+   }
+   elsif ($value eq "c"){
+	  $value="2";
+   }
+   elsif ($value eq "g"){
+	  $value="3";
+   }
+   elsif (($value eq "u") or ($value eq "t")){
+	  $value="4";
+   }
+   elsif ($value eq "n"){
+	  $value="0";
+   }
+   return $value;
+}
+sub pricompare{
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>INTRODUCTION<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   #===========The compare was used to decide whether a value in in certain range
+   #===========Usage: compare(n1,n2,n3,)
+   #===========the value 1 for true or 0 for flase will be return
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>END<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   my $n1="";#given number
+   my $n2="";#lower
+   my $n3="";#upper
+   my $result;
+   ($n1,$n2,$n3)=@_;
+   if (lc($n1) eq "null" or lc($n1) eq "a" or lc($n1) eq "u" or lc($n1) eq "c" or lc($n1) eq "g" or lc($n1) eq ""){
+	  $n1=nt2number($n1);
+   }
+   if ($n1 eq "-1"){
+	  $result=1;
+   }
+   else{
+	  if ($n1>=$n2 and $n1<=$n3){
+		 $result=1;
+	  }
+	  else{
+		 $result=0;
+	  }
+   }
+   return $result;
+}
+sub prilimit{
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>INTRODUCTION<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   #===========The range was used to provide range information
+   #===========Usage: range(parameter)
+   #			--up all parameters
+   #			--down the range parameters
+   #===========the corespond value will be return
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>END<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   my ($id)=@_;
+   my @range;
+   my %range;
+   my @rangeparameter=pmt("range");#the range parameter
+   my $m=0;
+   if (lc($id) eq "lower"){
+	  @range=("17","41","49","0","-1","17","-1","3","10","12","15","-172.2",
+			  "-307.7","0.16","0.21","0","0","0","0","0.05","0.06","0.08",
+			  "0.07","0.05","0.07","0.1","0.08","0","0","-1","-1","0","0",
+			  "-1","-1","0","0","0","-1","-1","0","0","0","-1","-1","0",
+			  "1","20","1","19","-1","-1","0.2","0","0","0");
+   }
+   elsif (lc($id) eq "upper"){
+	  @range=("27","250.96","379","24","116.42","35","103.85","27.42","23",
+			  "100.42","150","-6.16","-20","0.86","0.83","0.57","0.59",
+			  "0.7","0.6","0.43","0.44","0.49","0.47","0.42","0.43","0.5",
+			  "0.45","12","17.42","16","17.42","6","20.85","13.42","12","26",
+			  "57.42","80.92","56.54","52.85","0.51","0.47","0.46","0.64",
+			  "0.75","6","258.38","279.65","117.42","136.42","5.21","14",
+			  "0.85","23.85","9","12");
+   }
+   for ($m=0;$m<@rangeparameter;$m+=1){
+	  $range{$rangeparameter[$m]}=$range[$m];
+   }
+   return %range;
+}
+sub pmt{
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>INTRODUCTION<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   #===========The pmt was used to provide pmt files
+   #===========Usage: pmt(parameter)
+   #			--all all parameters
+   #			--range the range parameters
+   #			--svmoverall the svm parameters of all species
+   #			--svmoanimal the svm parameters of animal
+   #			--svmplant the svm parameters of plants
+   #			--svmvirus the svm parameters of all virus
+   #			--display the display parameters
+   #===========the parameters will be return
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>END<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   my $class;
+   my @parameter;
+   ($class)=@_;
+   if ($class eq "svmvirus"){
+   		$class="svmanimal";
+   }
+   if (lc($class) eq "range"){
+	  @parameter=("milength","prelength","prilength","length_basalsegment",
+				  "length_lowerstem","length_upperstem","length_topstem",
+				  "length_terminalloop","mipairs","prepairs","pripairs",
+				  "premfe","primfe","migc","prigc","mintcontent_a","mintcontent_c",
+				  "mintcontent_g","mintcontent_u","prentcontent_a","prentcontent_c",
+				  "prentcontent_g","prentcontent_u","printcontent_a","printcontent_c",
+				  "printcontent_g","printcontent_u","miinternalloop","preinternalloop",
+				  "internalloop_lowerstem","internalloop_topstem","miinternalloopnumber",
+				  "priinternalloopnumber","internalloopnumber_lowerstem",
+				  "internalloopnumber_topstem","miunpairedbases","preunpairedbases",
+				  "priunpairedbases","unpairedbases_lowerstem","unpairedbases_topstem",
+				  "miunpairedrate","preunpairedrate","priunpairedrate","unpairedrate_lowerstem",
+				  "unpairedrate_topstem","migu","mistart","miend","upperstart",
+				  "upperend","stability","preinternalloopnumber","pregc",
+				  "priinternalloop","pregu","prigu");#56
+   }
+   elsif (lc($class) eq "svmoverall"){
+        @parameter=("unpairedrate_lowerstem","prelength","internalloopnumber_lowerstem","length_upperstem",
+        "miinternalloop","firstbase","mintcontent_a","migc","pregc","prentcontent_u",
+        "prentcontent_a","internalloop_topstem","preunpairedrate","mipairs","prepairs",
+        "internalloopnumber_topstem","unpairedrate_topstem","mintcontent_c","mistart",
+        "miunpairedrate","mintcontent_g","terminalnucleotide","prentcontent_c",
+        "prentcontent_g","mintcontent_u");#25pmt
+   }
+   elsif (lc($class) eq "svmanimal"){
+        @parameter=("internalloop_topstem","internalloopnumber_topstem","length_topstem","length_upperstem",
+        "migc","miinternalloop","miinternalloopnumber","mintcontent_a","mintcontent_c","mintcontent_g",
+        "mintcontent_u","mistart","miunpairedrate","penultimateposition","pregc","prelength",
+        "prentcontent_a","prentcontent_c","prentcontent_g","prentcontent_u","preunpairedrate",
+        "stability","unpairedrate_lowerstem","unpairedrate_topstem");#24pmt
+   }
+   elsif (lc($class) eq "svmplant"){
+        @parameter=("firstbase","internalloop_topstem","internalloop_lowerstem","internalloopnumber_lowerstem",
+        "length_upperstem","migc","migu","miinternalloop","miinternalloopnumber","mintcontent_a",
+        "mintcontent_g","mintcontent_u","mipairs","penultimateposition","pregc","prentcontent_a",
+        "prentcontent_c","prentcontent_g","prentcontent_u","preunpairedrate","stability",
+        "unpairedrate_lowerstem","unpairedrate_topstem","upperstart");#24pmt
+   }
+   elsif (lc($class) eq "all"){
+	  @parameter=("miid","priid",
+	  "miseq","mistr_1","mistr_2","mistr_3","mistr_4",
+	  "preseq","prestr_1","prestr_2","prestr_3","prestr_4",
+	  "priseq","pristr_1","pristr_2","pristr_3","pristr_4",
+	  "milength","prelength","prilength",
+	  "length_basalsegment","length_lowerstem","length_upperstem","length_topstem","length_terminalloop",
+	  "mipairs","prepairs","pripairs",
+	  "premfe","primfe",
+	  "migc","pregc","prigc",
+	  "mintcontent_a","mintcontent_c","mintcontent_g","mintcontent_u",
+	  "prentcontent_a","prentcontent_c","prentcontent_g","prentcontent_u",
+	  "printcontent_a","printcontent_c","printcontent_g","printcontent_u",
+	  "miinternalloop","preinternalloop","priinternalloop",
+	  "internalloop_lowerstem","internalloop_topstem",
+	  "miinternalloopnumber","preinternalloopnumber","priinternalloopnumber",
+	  "internalloopnumber_lowerstem","internalloopnumber_topstem",
+	  "miunpairedbases","preunpairedbases","priunpairedbases",
+	  "unpairedbases_lowerstem","unpairedbases_topstem",
+	  "miunpairedrate","preunpairedrate","priunpairedrate",
+	  "unpairedrate_lowerstem","unpairedrate_topstem",
+	  "migu","pregu","prigu",
+	  "strand","firstbase","penultimateposition","terminalnucleotide",
+	  "mistart","miend","upperstart","upperend","stability");#77
+   }
+   else{
+	  @parameter=();
+   }
+   return @parameter;
+}
+sub predict{
+   #	predict the given result
+   #	receive the parameters
+   #	print out the correct results
+   my (%para)=@_;
+   my @pmt;
+   my $value;
+   my $label=2;
+   my $dataset;
+   my $rst=0;
+   my @svmone;
+   my @tmp;
+   my $mirbase;
+   @pmt=pmt("svm".$species);
+   foreach (@pmt){
+	  if (lc($para{$_}) eq "null" or $_ eq "firstbase" or $_ eq "penultimateposition" or $_ eq "terminalnucleotide"){
+		 $value=nt2number($para{$_});
+	  }
+	  else{
+		 $value=$para{$_};
+	  }
+	  push(@svmone,$value);
+   }
+   $dataset = new Algorithm::SVM::DataSet(Label => $label,Data  => [@svmone]);
+   $rst = $svmmodel->predict_value($dataset);
+   print " $rst\n";
+   if ($rst>=$cutoff){
+	  @tmp=split("\_",$para{'miid'});
+	  $tmp=@tmp;
+	  if ($tmp<2){
+	  	$tmp[1]="NaN";
+	  }
+	  if ($para{'miseq'}=~/[actug]/){
+	  		$para{'miseq'}=uc($para{'miseq'});
+	  }
+	  if ($para{'miseq'}=~/T/){
+	  		$para{'miseq'}=~s/T/U/g;
+	  }
+	  if (exists $mirbase{$para{'miseq'}}){
+		 $mirbase=$mirbase{$para{'miseq'}};
+	  }
+	  else{
+		 $mirbase="NaN";
+	  }
+	  print OUT "$para{'priid'}\t$para{'priseq'}\t$tmp[1]\t$para{'miid'}\t$para{'miseq'}\t$para{'mistart'}\t$para{'strand'}\t$rst\t$mirbase\n";
+   }
+}
+sub mirbase{
+   my $mirbase="UCACCAGCCCUGUGUUCCCUAG<miR-1226>
+GUGGGACGUAGCCUCACAGUGG<miR-1670>
+CGUAACUCGCUGCUGUGAGAGGC<miR-1451*>
+UGGUUGAUCCAUUGGAAGACUGA<miR-1728-5p>
+CGUGUUUACUGUGGACCUUG<miR-124-2*>
+UGCUGAAUUAGACCUAGUGGGCAU<miR1870>
+UGGGAUUUUUUAGAUCAGCAGU<miR-193*>
+UGAUCAGUGCCUUUCUGAGUAG<miR-465*>
+GGAAUGUUGGCUGGCUCGAGG<miR166m*>
+UGCCCUUAAAGGUGAACCCAGU<miR-938>
+GGAAAACCUUAUCAUGGCUAAU<miR-1422e*>
+UGUUGGCACGGUUCAAUCAAA<miR171i*>
+UACAAUUCCUUAGGUGCUUUU<miR2606b,miR2606a,miR2606c>
+UGACCUCCGCCUUCUUUUGCAG<miR-2550>
+UAUGAUGCAGAUUCUUCA<miR902a-5p>
+UAUUUGUCAGUGUUUGAUGAA<miR2611>
+CCAAUAUUGGCUGUGCUGCUCCA<miR-195*>
+GGCCUCUCUCGGAGGUUUCA<miR-4000e-3p>
+CGAGGCGACGUGAGUCUAUUCCGC<miR-3209>
+GCGUCGAGCACCGUGCUGGAGGA<miR-M27-3p>
+CAGGAGUCGAGUGAUGGUUCAAA<miR-3543>
+GUGGAGGAGAAUGCCCGGGG<miR-2893>
+AUAUGUUGCAGAUUCUUCAUU<miR902j-5p>
+UGCUUCGCCCUCUCCAUCAUAA<miR-rL1-17>
+GCCUGGUUUCAGAGAGGUGUA<miR-992*>
+GCAGACUGCAAACAAUUUUGAC<miR-759>
+UCCUAACAGCAGGAGUAGGAGC<miR-3098-5p>
+AUAUACAUACACACAUACACA<miR-466b-2*>
+AGCCCCUGACCUUGAACCUGGGA<miR-3070b-5p,miR-3070a*>
+AGGAACAUUCUGUGGAACGG<miR-4018b-5p>
+AUCUCCCUCAGAGGCUUCCAA<miR477a,miR477b>
+UGUCUCGGAAAUUUGCACCCU<miR4230>
+CAGAAUUGCAGUGCCUUGAUU<miR1447>
+GCUGGUGCCGACGAUCGCCGGGA<miR-H5>
+CCUUCAGUUGACUCGUGAUCCG<miR-250*>
+UUCGCUUGCAGAGAGAAAUCAC<miR173>
+UUCUCUCAAGUUGCCAAACAAG<miR2100-5p>
+AUCAACAGACAUUAAUUGGGCG<miR-421>
+UUUUCAACUCUAAUGGGAGAGA<miR-1305>
+GGGAUUACUAAUGGCGUAGUGCG<miR-2846>
+GACACGGGCGACAGCUGCGGCCU<miR-602>
+UCACUCAAGGAGGUUGUGAUGG<miR-307-as*>
+GUCUGCAUGGGUGAGCCUUAUCU<miR-557>
+CCUAGUAGGUGUCCAGUAAGUGU<miR-325>
+CACAGCGCAUGCAAUGUGGACAU<miR-460b-3p>
+UCUUCCCUAUUCCUCCCAUU<miR482c>
+GCCAUGACUAAGCAGGACCAG<miR1111>
+AACAUUCAACCUGUCGAGCAAG<miR-181>
+UGGGAGCGGAAUGUGCAGCCUCA<miR-1723>
+UGGAGGCCUGGUUGUUUCCUG<miR-78>
+CAUACAAGGGUAAUUUCUUUUC<miR-539*>
+UGUGUUCUCAGGUCACCCCUU<miR398,miR398b,miR398a>
+GUUCUAUGAUGCUUUGCUGAGAAUU<miR-1463>
+GAUCGUGCUGCGCAGUUUCACC<miR167f*>
+GAACGCAUGAGAGGUUGGUGAA<miR839*>
+GAACGUCAGGCUGACACAAU<miR-4181-3p>
+UCAACUGAUUCUAGUCAUCCUUA<miR-7a-3p>
+UCGGUGGGACUUUCGUUCGUUC<miR-278>
+UUCCCUUUGUCAUCCUUUGCC<miR-211>
+AAGAGAGCCGUCUAUUGACAGU<miR-46*>
+CUCGGGGAUCAUCAUGUCACGA<miR-542-5p>
+CCCGUGAAGUGUCUGCUGCA<miR-267>
+GUGAGACUAAUAUAUCCAUGGUGU<miR-3219>
+UUCCACAGCUUUCUUGAACUGU<miR396e>
+AGGAGACAGUGCUGUCGGGAC<miR-650d>
+CGGCGGGGAAGGCGAUUGGUC<miR-1908>
+UGAACACAUCUGGUGGUAUCUCAGU<miR-317>
+UAGGCAAAAAUCAGUUUCAAUAU<miR-2507b>
+UCUGCCCUGCAGCACUGAGAUCU<miR-1646>
+AUAGUUUGUUUCUUUGUAUU<miR-4039-3p>
+CAGAAGUCAAGCAUCGCCUUCCA<miR-3321>
+UACAGUACUGUGAUAACUGA<miR-101>
+UCUUUGGUUGUACAAAGUGGUAUG<miR-244>
+CAGUUGGGUCUAGGGGUCAGGA<miR-4259>
+UUCAGCCAGGCUAGUGCAGUCU<miR-3157>
+UGUCAACUGGGUCUCUCCUAGA<miR-1350>
+AAAGGUGCCAAUUAUGAGUGU<miR2649>
+AAGUACUCGCCCUGUCUCAGUA<miR-2385-3p>
+ACUAAGGACAGAGGAACGGAG<miR-1718>
+UGUUUUGAUAACAGUAAUGU<miR-2052>
+UAGAACAUGAGUGUAGACGAC<miR1048-5p>
+AAAGUUAACUAUGGCAUUCCC<miR4242>
+UAUACCACCCCCAGGAGUUCUGC<miR-1658>
+UAGUGCGCCGGUGACCUGAUAG<miR-rL1-10>
+UCACUGGGAGAGACGGGAAGUUG<miR-3407>
+GUUUGUGACCGUCACUAACGGGCAGU<miR-274>
+UUUUGUGACCGACACUAACGGGUAGU<miR-274>
+CUGCGACAAGUAAUUCCGAACGGA<miR1135>
+AAAUUGCCACCAGGUCAGAUGG<miR-1420g*>
+UGACACCUGCCACCCAGCCCAAG<miR-667>
+CACUGAAACAUAGAUCACUU<miR-4139-5p>
+UUCACAUGAUGUCUUGCUGAUG<miR-1681>
+UCCUUCUCGCGGAUAGCGUAGAUGU<miR-H10>
+UCUGCGAAAAUGUGAUUUCGGA<miR4392>
+UCCAUAGCUUCAUCUCUGACC<miR3438-3p>
+CAAACUACAAGUUUUAAGCCUCA<miR-2218a>
+GCUGGGCAGGGCUUCUGAGCUCCUU<miR-612>
+ACUACUACAUCAUUGAUGUUGAAC<miR480b>
+CGGAUAAGCAAAGAAAGUGGUU<miR-1255b>
+AUCUUACUGGGCAGCAUUGGA<miR-200b*>
+UACUGGACCCUGAAUUGGAAAC<miR-BART9*>
+UCUUGUCUCUGGGUGGGUUCGGA<miR-I3>
+UAUGCAGGGUGCAUAAGGAUU<miR2652f,miR2652c,miR2652j,miR2652i,miR2652b,miR2652g,miR2652a,miR2652l,miR2652h,miR2652d,miR2652k,miR2652e>
+CGCGUCAUAAACUUCCCAUAU<miR-3204a>
+ACCACAGGGUAGAACCACGGA<miR-140>
+UCCUUCAUUCCACCGGAGUCU<miR-205>
+AGUGGUUUUACCCUAUGGUAG<miR-140>
+UGAACACAGCUGGUGGUAUCUCUUU<miR-317>
+UAUGGUCAUACGGAUUGUUGAU<miR4380b>
+UCAGUGCAUGACAGAACUUUGG<miR-152>
+UCUGUAUUUCUCAUCUUCCCA<miR-2205*>
+UCUUCCCAAUUCCGCCCAUUCC<miR482>
+UAUUGCACUCGUCCCGGCCUCC<miR-92b-3p,miR-92b>
+ACGCUCUGCUUUGCUCCCCCAGA<miR-3104-3p>
+CAAUAAGAACGUGACAUAUGACAG<miR1520e>
+UCUAGAACUCGAGAUAUGGGC<miR2912b,miR2912a>
+ACGGUGCUGGAUGUGGCCUUU<miR-1250>
+UGGGGGAGGAGGGACCUCUGCUU<miR-1773*>
+UAUGUCCAUUACAGUUGCAUAC<miR534b>
+UGGAAACAUUUCUGCACAAACUAG<miR-147*>
+UGAAUUUGAGAAGUUGAGGUA<miR4249>
+UAUCUUUAGCAACACUUUUGA<miR-2582a*>
+AAAGUGCGACCGGAUUGGGU<miR-1420f>
+UCACUUUGUAGACCAGGCUGG<miR-3470a>
+UGAGAACUGAAUUCCAUAGAUGG<miR-146a>
+AUGCACCUGGGCAAGGAUUCUG<miR-500a*>
+UUGCAUAGUCACAAAAGUGAUC<miR-153a,miR-153>
+GGGGCGGACUGGGAACACAUG<miR398b*>
+AGAAGCCUUUGUGGGAGAGGA<miR477a-3p>
+CAGGACUGCCUCAGAGAGCAG<miR-2965>
+GAAGGUAGUGAAUUUGUUCGA<miR417>
+GCCUUUUCGUGUAAAUUUCCAU<miR-4000a-3-3p>
+UAUUCAGAGUGGUAGCAGU<miR-881*>
+AUCUAGGGACGCGUCGGCAACU<miR-2398>
+UACCCUGUAGAACCGAAUUUGU<miR-10b>
+CGAGGCUUAAUUGAACCAAAAAGC<miR-2760*>
+GGACUGUAGAACUUUCUCCCU<miR-625>
+UGUUUGGGACGUUGCUCUGCAG<miR-1569>
+ACAAGUCAGGUUCUUGGGACCU<miR-125b-2-3p>
+UACCGCUUUUCGGCUAAAGG<miR-244*>
+UUUUCUCCUUCCCCCCGGAGUU<miR-M9-5p>
+CUUCAACCUUAAGGGGGCCUCA<miR-3593-3p>
+AAGAUAAGCGCCUUAGUUCUGA<miR852>
+UCUAUUUCAUUGUUCCACACA<miR2596>
+UUCAAAUGUUCGGAUGCGUGC<miR1077-5p>
+CACCCUGUCAGACCAUACUUGUU<miR-2755>
+CACAGGACAGGUAGCCAGGCUGG<miR-1739>
+AGCUCUGAUACCAUGUUAACUGUU<miR1863b>
+AAGCUCAGGAGGGAUAGCACC<miR390b>
+CGGCAGAUGAAGUCCAUC<miR-2896>
+GCGGCCCCUGGGCGCGGAGAG<miR-B2RC>
+UGAGCCGUGUCCGUACCGCUUUCA<miR-3335>
+GAUGCCACUGUUUCUCAGUCGUA<miR-3415>
+UGCAGCGGCGACUGGGGCCGA<miR1150.3>
+GUGAAAUGUUUAGGACCACUAG<miR-203>
+GCUGCACUUGGAUUUCGUUCCC<miR-191*>
+UCUCGGCAAAGAACUAAGAAGAAG<miR4391>
+CACUGCCUCAGACAACGGGUGU<miR-1592>
+UAAGCGUAUAGCUUUUCCCCUU<miR-965*,miR-965>
+AAUGGCACUGGUAGAAUUCACGG<miR-183>
+CAUCUCUAAGGAACUCCCCCAA<miR-3675-3p>
+UAAAGCUAGAUAACCGAAAGU<miR-9*,miR-9a*>
+GAAGUUGUUCGUGGUGGAUUCC<miR-382>
+UGGCAAGAUGUUGGCAGUCGCAU<miR-73b>
+UAGGCCAUGGUAGAUAGAGAUGG<miR-1836>
+GAGGAGGCCAUAGUGGCAACUGU<miR-764*>
+UGGGUGGUGAUCAUAUAAGAU<miR823>
+UAUUGCACUUGUCCCGGCCUAU<miR-92a>
+UCUUAGAUCUACAAUGCCACC<miR1028b-5p>
+CUAGGCGCGACUGAGAGAGCA<miR-K12-8>
+UAGCAAAAACUGCAGUUACUUU<miR-548p>
+GCCAGGGCCAUGAAUGCAGA<miR3511-5p>
+UAGGUUACAUGCGGUGCAGUAU<miR-1421c>
+UAUGGCUUUCAUCCUAUGUGAA<miR-135a>
+AAAUUGCUGAUGUUGUAUUA<miR-4132-3p>
+AGAAUUGUGGCUGGACAUCUG<miR-219-3p>
+AAGUGAUUUAAUUAUGCCGUU<miR810b.2>
+AUGUAUGUGUGCAUGUGCAUG<miR-297>
+UAUUGCACAUUCCCCAGCCUGA<miR-311b>
+CCUGAACUAGGGGUCUGGAG<miR-345-3p>
+UUCCUAUGCAUAUACUUCUUU<miR-202,miR-202-5p>
+UGCAUUGUAUGUGUUGACAUGAU<miR-669g>
+UCAUGUAUUCUAAUUUUUCUUUAUA<miR-3350>
+GGCGGAGGGAAGUAGGUCCGUUGGU<miR-658>
+UGGAUUGGUCAAGGGAAGCGU<miR3440b-3p>
+GCACGUGAUGAGAACUCUGU<miR-2989>
+UCUUACACGCACGUCACUCUGGU<miR-M22>
+UACCCGUAUUUGUUUCUGCUGAG<miR-55>
+UUUCUAUCUUCUCUUCCAAUC<miR1027a,miR1027b>
+UAGAUUUUUUGUUUUCUUUU<miR-2393>
+CAAUCCAGGCAAGUGUUUCUAU<miR-1422a*>
+CCCAUAAAGUAGAAAGCACUAC<miR-142-5p>
+UUUAGAAACACAAAUCAUGUGU<miR-2566a-2*>
+AGCCUCGGAGUGCGGAUUAUC<miR2111g>
+CACGUACUCCCCUUCUCCAAC<miR164a*>
+GUUUUGCAGGUUUGCAUCCAGA<miR-19*>
+UAAUACUGUCUGGUAAUGAUGUU<miR-200b,miR-200>
+GGGUGGGGAUUUGUUGCAUUAC<miR-92a-2*>
+UGCCCUAUGGAUUCAGUUCUGC<miR-146b*>
+UCAGAAGUUGUGAAAGCUGCAG<miR-1804>
+ACCAGGAGGCUGAGGCCCCU<miR-665>
+UUGCAGCUGCCUGGGAGUGAUUUC<miR-1301>
+AGUUGGUAGACUGAUUUCAG<miR-4044-5p>
+CAAAGUGCUUACAGUGCAGGUAGU<miR-17-5p>
+UGGUUGACCAUAGAACAUGCGC<miR-380-5p,miR-380*>
+GCUCUUUUCACAUUGUGCUACU<miR-130a*>
+GGGUUCGAAGUAUGUCUCUCUUU<miR-2152>
+UUUGUUCGUUCGGCUUGAGUUA<miR-375>
+UAUCCGGCGCCGCAGGGAGG<miR1846d-3p>
+UCACUGGGCAAAGUGUGUCUCA<miR-3>
+GGCUUGGGGCGAUACCACCACU<miR-K12-10a*>
+UAGGUUGGUGAUCAUAUAGGAU<miR823>
+UUCCCAAUGCCUCCCAUGCCUA<miR2118r,miR2118e>
+AAUCACAGGAGUAUACUG<miR-308*,miR-308>
+UAACCUGAUCAGCCCCGGAGUU<miR-BHRF1-1>
+UCAGGGCAGCAGCAUACUACU<miR3624>
+UAAGGAUUCAUGUGCUUUCAG<miR-2549>
+UGACUAGAUACAUACUCGUCU<miR-996>
+UUUGGAUUGAAGGGAGCUCCU<miR159c>
+UGGAGUGUGACAUUUGUG<miR-1352>
+ACUCAAAUGUGGGGCACACUUC<miR-295*>
+GAGGGCCCCGGAACUCGAGCCG<miR-1363>
+AAGAGCGCCAUGGCACGCAGC<miR1163.1>
+UCCUUCAUUCCACCGGAUCCUG<miR-205b>
+AAUUCCCUUGUAGAUAACCCGG<miR-3938>
+UAGCACCAUUUGAAAUCAGU<miR-29b>
+GGCUGCAGCGUGAUCGCCUGCUC<miR-666*>
+CUCGAGUGUGGAGAGCAUGGGA<miR-2576>
+UAGGUUAUCCGUGUAGCCUUCG<miR-154>
+UACCCUACGCUGCCGAUUUACA<miR-BART14*>
+UAUCACAGCCUGCUUGGAUCAGU<miR-2d>
+UCACUUGAAACCCAGGACCU<miR-4052-3p>
+AGUCAUGGUGUUCGGUCUUAGUUU<miR-1933-5p>
+AGGAAGGUAGGGCGGGCGUCGCU<miR-2961>
+GCUCACUGCUCUUUCUGUCAUC<miR156h*>
+UAAUCCUACCAAUAACUUCAGC<miR856>
+CUGUGUAGCCUACUGACUCUA<let-7a-2*>
+UUCGUCUGACAUUCGGCAAG<miR-4144-5p>
+UUCACUAUCUGCAAACACCUCU<miR1080>
+UUCAGCUCGAGCAGUCUAACAG<miR-3205>
+ACAUUGCCAGGGAGUUU<miR-4317>
+CACGAAGAUGGAAUACGCCAUG<miR-2249>
+AAAAAAUGGUCAUGACUGAU<miR-1422f*>
+UAGCAGCACAUAAUGGUUUGUG<miR-15a>
+UUGUUGUUUUACCUAUUCCACCC<miR1510a-3p>
+UCAUUUGUGCCAAUCAUUCUA<miR4227>
+CAUGAAAGAAUGAUGAGUAA<miR2628>
+UUGUCGCAGGAGAGACGGCACU<miR3627>
+CAGUCAAUAUUGGCUGAUGGCA<miR-2a-5p>
+AGCAAACACAGUAGUGUGCAA<miR-3338*>
+CCCAGAUAAUGGCACUCUCAA<miR-488,miR-488*>
+AACGGGCCGCCGCACUGCUGG<miR2906b,miR2906a>
+AUGGAAUUUGAUAAAUAAACAC<miR4223>
+CACUACAUUAUGGAAUGGAGGGA<miR1118>
+AUCGGGAAUAUCGUGUCCGCC<miR-425*>
+AAGCUUUUGGCCCAGAUUAUAC<miR-208*>
+AUUGCACUUGUCCCGGCCUGCU<miR-92c>
+UCCAGAACCUUUCAAGGGACUGA<miR-2979>
+CGCGGGAGAAAAGUAGGACAUU<miR-2775a>
+UGCAGUGCCCACUGUGGAAGAUG<miR-2416>
+UGAGGUAGUAGGUUAUGUUGUU<let-7b>
+UAAACAGUGCCCACCCUUCAUC<miR3701>
+GUGCAGCUCUCCUCUGGCAUG<miR399b*>
+AUACAAACAGCUAAACUUAU<miR-3484-3p>
+AAGUACUAGUGCCGCAGGAG<miR-252>
+AUAAGUGUGAGCAUGUAUAUGU<miR-467e>
+ACCUGGCAUACAAUGUAGAUUU<miR-221*>
+UGAAGGUCUUCCGUGUGCCAGG<miR-493b>
+UCCUGUGUUUCCUUUGAUGCGUGG<miR836>
+CAGAUAUUUCUGUACCUACAG<miR-2558*>
+UCCAGUGAUUCACACCAGCUGU<miR-1756a>
+AAAACCGUCUAGUUACAGUUGU<miR-1537>
+UCGUACUCGUCGGGUAUCGGGUAU<miR4390>
+UAUCUGAAGAAGCUGGAGCAUC<miR-2201>
+GGGGGCAGGGCCUUUGUGAA<miR-326*>
+UAGACAACCCUGUCUUGAUUGAU<miR-1422n>
+UCGACGGCGAGGUUGGACUAG<miR3461>
+UUUGUCGUGUCUGGUAGUCGC<miR-2734>
+GGCCACCGAGGAUGCGGUC<miR-rR1-1*>
+AAGCCGGGCCGUAGUGGCGCA<miR-1965>
+ACCACUGACCGAGCAUAUCCA<miR-190a-3p>
+AUCAACAAACAUUUAUUGUGUG<miR-545>
+UGAGCCAGGAUGACUUGCCGG<miR169q>
+GUGAGCAAAGUUUCAGGUGUAU<miR-87,miR-87b>
+AUUUCUAGGACAUACUACGACGGU<miR4352a>
+GCUGACUCCUAGUCCAGUGCU<miR-345-5p>
+AUUGACUCUAGUAGGGAGUCC<miR-929>
+UGGCCAAUGAUUGUGGCUGCA<miR-1405*>
+UUCCACAGCUUUCUUGAACUA<miR396a>
+CGCGGAAAGGUGUGCACAUCGUA<miR-rR1-6>
+UAGUACCAGUACCUUGUGUUCA<miR-624*>
+UAAGCGUAUAGCUUUUCCCAUU<miR-965>
+UUGGGGCUGGGCUGGGGGCA<miR-1584>
+UCUCUAUAUUCGUGUCUUUCAU<miR-71a-2*>
+UGAGAUCGCGAUUAAAGCUGGU<bantam>
+AAAAAACUUACGGAUCAAGUUGAU<miR4343a>
+UGGAAUGUAAAGAAGUAUGCGU<miR-1-3p>
+CACGGUAGCUUGCUCACUUAGA<miR-2019*>
+UGAAAGACUUGAGUAGUGAGACG<miR-71b-5p>
+UUACAGGCUAUGCUAAUCUAUG<miR-2187>
+ACUAUAUAUCAAACAUAUUCCU<miR-190a*>
+UACCCAGGAGAGUGGCAAUCACA<miR-510>
+UAAGCUGCCAGCAUGAUCUUG<miR167c>
+GGUGGGAGGUGGGGUGGUUC<miR-705>
+UGUGUUAGUGCGGAUGGUGUUA<miR-2414>
+CGGGUGAGGGCGGUGGGGGA<miR-1790>
+CCGGGACGGGACCGGGACGGG<miR-2966>
+UGAAAGUGACUACAUCGGGGU<miR161.1>
+AGGGGCUGGCUUUCCUCUGGUC<miR-185*>
+UCCUUCAUUCCACCGGAGUCUGU<miR-205>
+UCUUCCCUAUGCCUCCCAUUCC<miR482a>
+CCCAAUAUUAUUGUGCUGCU<miR-16b*>
+AGCUUCUUUACAGUGCUGCCUUG<miR-103-2*>
+GGCAUCCAUUCUUGGCUAAG<miR169m*>
+CAAUAUCAGCUGGUAAUUCUGGGC<miR-283>
+UGCCAAAGGAGAAUUACCCUG<miR399>
+UGACGUAAAACGUGUGUG<miR-4194-5p>
+GUGCCUACUGAGCUGAUAUCAG<miR-24-1*>
+CAUUUAGCCAAAGCCUGACUGU<miR-344b>
+AGUUUUUGCUGUUUCUUAUC<miR-2365>
+UCACAACCUCCUAGAAAGAGUAG<miR-67>
+AACUGUAGUCCGGGUCGAUCUG<miR-K12-2>
+CAGAGUAGGCAAAAAAACAAUU<miR-2778b>
+UGAGGUAGUUAAGAAUAUGUG<miR-84b>
+UGGCCCUGACUGAAGACCUGCAGU<miR-1291>
+CGAAUAUCAGUUGGGGUAUUUAC<miR-786*>
+UGGUAAGAUGCGAGUAUGGU<miR-4157-5p>
+GAGCUUAUUCAUAAAAGUGCAG<miR-590-5p>
+AGUGCUGGGAGAUGUUAUCACG<miR-1419b>
+AGCAUUUUUCGAGGCAUUUCAU<miR-1a*>
+UGAUAUGUUUGAUAUUAGGUU<miR-190b>
+UAAAUAUAAUGUCAUUUAUACAU<miR-4204-5p>
+UUGAAAGUGACUACAUCGGGG<miR161.1>
+UUUUCAGACCAGAUGUGCUACC<miR-4142-3p>
+UGUGUGCAUGUGCAUGUGUGUAU<miR-466m-5p,miR-669m-5p>
+UAGCAGCACGGAAUGGUUUGUG<miR-15a>
+AGCUGCUGACUCGUUGGCUC<miR4414>
+UAUCCAUCAGUUUGUAGGUAAAAU<miR-3206>
+UCGGUGGGACUUUCGUCCGUUU<miR-278*,miR-278>
+UGUGUGUUUCAUUUCGUUG<miR-4202-5p>
+UACCCGUAGUUUUCGGACAGUU<miR-2237b>
+CAAAGUGCUAACAGUGCAGGUAG<miR-106a>
+CAUCACAGUCUGAGUUCUUGC<miR-11>
+AUCAAACCGGGGGGGAUUUCAGU<miR-H18-5p>
+CGAUAUGUGGUAAUUUGGAUGA<miR-756>
+CUCGGAGGGCUCGGAGGACGACUC<miR-B5>
+UAAUCAAUCUUAUUACGUUUAUAG<miR-2564>
+UGCAUAGUGGGUGAUCUUCUU<miR-1421w>
+UAUUGCACUUUUCACAGCCCGA<miR-313>
+CAGGAUGUUCGACUUGUUGU<miR-4073-3p>
+UCGGCUGUACUGUCCUUCAUG<miR2623>
+GAGGCUGAUGUGAGUAGACCACU<miR-3929>
+UCUUGUUAAAAAGCAGAGUCU<miR-544-5p>
+ACGAGCUUCGCGGUACUACUC<miR-H23*>
+UCACCGGAGACAUUGUUCCGCA<miR-36a>
+GCGGUCACUCGACGCGAGCACCG<miR-m108-2-5p.1>
+UUUGCUAGUUGCUUUUGUCCCGC<miR-2022>
+UUCGAUGUCUAGCAGUGCCA<miR775>
+AGCCUUAUUAGGAUUUGAUGG<miR1037>
+CCUAUUCUUGGUUACUUGCACG<miR-26a-1*>
+GUUUGCACGGGUGGGCCUUGUCU<miR-557>
+UAGGCCUGUGUUUUUGUGCAUA<miR-1660>
+AUUGGGAACAUUUUGCAUGCAU<miR-450b-3p>
+UAUACAUACACACAUACCCAUA<miR-297b-3p,miR-297c*,miR-297a*>
+GUAAGUGAUGACGUCAUUUG<miR-4026-5p>
+AUAGAUUAGAUCAAUAUAUUAGU<miR1528>
+UUGAGGAACGUCGCGGAGUCA<miR3456>
+AGCUGGUGUUGUGAAUCAGGCC<miR-138>
+AACCAACGAGACCAACUGCGGCGG<miR1125>
+AAAUACUGCCUGGUAAUGAUGC<miR-200a>
+UACUGCAUCAGGAACUGAUUGGA<miR-217>
+UGCGGCCGGUGCUCAGUCGGC<miR-1199*>
+UGAGGUUGGUGUACUGUGUGUGA<miR-672>
+CGGCAACAAGAAACUGCCUGAG<miR-196a*>
+CGCUCAGUAGUCAGUGUAGAUC<miR-222a*>
+CUUUCAGUCGGAUGUUUGCAG<miR-30b-3p>
+AGCUGCUUAGCUAUGGAUCCC<miR159d>
+GCUGCAGUUGGAUUUCGUU<miR-191*>
+GCUAUGCAGUUGUUCAUGAGCU<miR-3088*>
+CCAGUAUUGCAUUGCUGCUUGA<miR-16c*>
+UACUGCCCUAAAUGCUCCUUCU<miR-18*>
+GUUUUUUUGUAUAUCCUGC<miR-2778a-2*>
+UGUGUCACUGGGGAUAGGCUUUG<miR-1970>
+AGAAGGGUCUACAUCAUAAAC<miR902h-3p>
+ACGUAUACUAAAUGUAUCCUGA<miR-iab-4>
+GCAGCACCAUUAAGAUUCAC<miR172e*,miR172b*>
+GUGCAUUGUUGUUGCAUUG<miR-33b>
+UACCUGAAGCGGACAUCUUGC<miR918>
+AAAUCUCAAAUUGUAAAUGUGUA<miR-304>
+UAGAGCAUGUAAAGGGAUUUCC<miR-1372>
+UAUGCAUAUACACACAUGCACA<miR-669h-3p>
+UAAAAACAGGCAGUGUAAAU<miR-4134-5p>
+CAACGAGUCCUUGAAAUUACCGG<miR-1479>
+CCUAGUAGGUGCUCAGUAAGUGU<miR-325-5p,miR-325*>
+UGGAGGAGAGGGAAGGUGCUG<miR-765>
+CGACAGAAGAGAGUGAGCAC<miR156a,miR156g>
+GUCUCGGUGCAAGGACUGGAGG<miR-678>
+CUGCCACCUGUAUUUCUAUCA<miR-2023*>
+UUUCUGACGGUGGCUCGUGUCG<miR-m108-1>
+ACGUGCGUGGUAGUUUAACCU<miR-4189-5p>
+AAGUAGACAUUCUAAGACGUUGCU<miR4344>
+UUCUCCAAAAGAAAGCACUUUCUG<miR-515-5p>
+AGAGCUUAGCUGAUUGGUGAAC<miR-27b*>
+UUCCUAUGCAUAUACUUCU<miR-202>
+CUGUGGGCUCAGCUCUGGG<miR-4265>
+AAAGCGCUUCUCUUUAGAGGA<miR-518e>
+UGGAAGACUAGUGAUUUUAUUGUU<miR-7>
+UUCACAGUGGCUAAGUUCCAC<miR-27c>
+UACCCUGUAGAUCCGGACUUGU<miR-10c>
+CUUAGCAGGUUGUAUUAUCAUU<miR-374b*>
+AAAGUGCGACUGGAUCGGAUCG<miR-1420e>
+UGUGUUAAGCUGGUCUUUCAGA<miR-2167>
+UGCCUCUUUCAUUGAUCUUGGUGUCC<miR-469>
+UGGGAUGAGUGUGGCGUGGUCG<miR-2418>
+CCGGGUGGGGCUGGGCUGGG<miR-1584>
+AUCCUCGGGAUACAGUUUACC<miR2111b*>
+UGGAUUUCAUAUUUUUCACG<miR1046-5p>
+UGUGGUUGCCCAAUUAGUCCCU<miR-1361*>
+CGUGUUGUGGAGAACGACAA<miR-4092-5p>
+AUGUAGUACUGAGUCUGUCGUG<miR-3559-3p>
+GAAGCUCGUCUCUACAGGUAUCU<miR-993a,miR-993>
+AAAGACCCAUUGAGGAGAAGGU<miR-3667-5p>
+UCCUUGUUUGGGUUGUAAUGA<miR-3531>
+UAGGGUACACCCAUACUGAGCCG<miR-2272>
+UGAGAACUGAAUUCCACGGGUU<miR-146a>
+GCCUGCUGGGGUGGAACCUGGU<miR-370>
+AAAGCCUUGAACGCUGUCGUU<miR4228>
+ACCAGCAUUCCAUUGGCAGAGG<miR2092-3p>
+UCAGGUCAGCUACGACACGAGCG<miR-2040b*>
+UCGAAUCUUCAAGGUGAA<miR-10b*>
+UCUCACCCUAUGUUCUCCCACAG<miR-1982.1>
+UCAUAGCCCUGUACAAUGCUGCU<miR-103-as>
+AGGGAUGUUCCUUCUUCGCC<miR-613>
+GAGUGCCUUCUUUUGGAGCGUU<miR-515,miR-515-3p>
+ACUUGUGUGUGCAUGUAUAUGU<miR-669d>
+UUGAAGAGAGGUUAUCCUUCGU<miR-300>
+UUUUCAUUGGUUUCUGUGAAAU<miR-797*>
+UGUAAAUCAAAUGUGUACACCUG<miR-3248>
+UGUCUUUUUCCUAAAACGAUUCA<miR-3270>
+AAAGGAUUGGCUGAAUUGUAG<miR-2462>
+UGAUCACUAGCUCUUCUGUAGC<miR-2953-3p>
+GCCCCGGCCGCUCCCGGCCU<miR-2890>
+AUAUUUAAGAUGGGAUAA<miR-4184-3p>
+UGCACUGCCUCUUCCCUGGCUG<miR408>
+CUAACCUAGUAGAUGAAGCA<miR-4080-3p>
+CGGCAGUGAGUCGAUAGCGCCCUUU<miR-1483-5p>
+UUUGGCACUAGCACAUUUUUGCU<miR-96>
+AUAAAAGUAUGCCGAACUCG<miR-1013>
+AGUAUCCAGAAAACUCUAAUU<miR781*>
+UAAAGCCUGUAGGAUUGGGUCGU<miR-2971>
+GUCUGUUUUACCAAGGUCC<miR-4001b-2-3p>
+GGUAAACUAUGGAUUGCGCUUC<miR-2029*>
+CAGCAGCAAUUCAUGUUUUGA<miR-424>
+CAACAUUAUUUCUGUUUUCCAA<miR-7d*>
+GCUUAGAUGUGACAUCCUUAAAA<miR1138>
+GUGCGGUUCUCCUCUGGCACG<miR399a*>
+UCCCUGAGUGUAUGUGGUGAA<miR-670>
+UGAUAAAUCAAAGUGCUCACU<miR1069-3p>
+CACUAGAUUGUGAGCUCCUGGA<miR-28,miR-28*,miR-28-3p>
+UUACACUUGCCCUUUUUUCCCCAG<miR-3572>
+UGGACUGCCCUGAUCUGGAGA<miR-1288>
+GUGAGCCGAACCAAUAUCACU<miR171e,miR171k,miR171h>
+ACAUGUUUACAAGUUAAAAUGU<miR2101-5p>
+UCGAGGAGCUCACAGUCUAGU<miR-151*,miR-151,miR-151-5p>
+AUGGUUGCAAUAGAAAUCAUG<miR1173>
+UCCAGCUCGGUGGCAC<miR-4267>
+UAAUUUUUAUGUGGGAGUGUU<miR2604>
+AAAAAAUCCGAAUUCAGCUGU<miR-2200*>
+UGGAUUUUUGGAUCAGAGA<miR-1290>
+CUCUAGAGGGAAGCGCUUUCUG<miR-522*,miR-519a*,miR-518e*,miR-519b-5p,miR-519c-5p,miR-523*>
+UCCGGGACUGAGUUCUGUGCAC<miR-673*>
+GUGGUCACAGUUGGCGCCAGCC<miR-3073-5p>
+UAUCACAGCCAGCUUUGAUGUGC<miR-2,miR-2b>
+CCUGAGAAAAGGGCCAA<miR-4251>
+AACCCUGUAGAUCCGAGUUUGA<miR-10b>
+UUUCAUCAAAGUCACUAAUAA<miR-3009>
+UCCUCCCUACUCCUCCCAUU<miR482d>
+AAAGUGCUUCCUGUUCGGAUAA<miR-1420a>
+GUGUGGUUGGUUGGUGGUUG<miR-4020b-5p>
+CCAGCGAGCCUCCCGGCGAGC<miR-3348>
+AAACUCGAAUGAACUCUUUGGC<miR-2435>
+GCCCGCAUCUCUGGAUCCC<miR-3584-3p>
+UCAACUCGUUCUGUCCGGUGAG<miR-1897-3p>
+UUAAGUAGGCACUUGCAGGCAAA<miR-2943>
+UCUACAGUGCAUGUGUCU<miR-139>
+AUCGGGAAUGUCGUGUCCGCCC<miR-425-3p,miR-425*>
+AUUGUACUUCAUCAGGUGCUCUGG<miR-305>
+UUGGGCUUGCAGCAGAGAGUAA<miR-2308>
+CAACACCAGUCGAUGGGCUGU<miR-21*>
+UUUCGUUUUCGAAGGUCGGCUG<miR-rL1-30>
+UUGGGAUAUACUUAUACUAAA<miR-1302e>
+UGAUGACGUUUGUGCUGAAAU<miR1098>
+AAUCUAGCCUCUACUAGGCUUUGUCUGU<miR-282>
+UAGUAUGGGUCUUGACAUGUGACU<miR-2570>
+ACUCAAACUGUGUGACACUUU<miR-293>
+CAAGCUCGCUUCUAUGGGUCUG<miR-99a*>
+CGCACUCUGGUCUUCCCUUGCAG<miR-3076-3p>
+UCUGUCAUUUCUGUAGGCCAAA<miR-215*>
+AUUGUAUUGUUUCUUAUGAC<miR-2480>
+CGGGGCAGCUCAGUACAGGAU<miR-486-3p,miR-486*>
+UAAAUGCUGCAGUAGUAGGGAU<miR-BART14>
+UCAGGUACCUGAAGUAGCGC<miR-275>
+UGGAAUGUGAUAAGGUGCUU<miR-2180>
+ACUUGUAUGCUAGCUCAGGUAG<miR-643>
+UUGAGGAAAAGAUGGUCUUAUU<miR-3915>
+UCCCUGUCCUCCAGGAGCUCAC<miR-339,miR-339-5p>
+UGGAAUGGAAAGCAGUAUGUAU<miR-1c>
+GCGGAGAAGGUGGAACUG<miR-1402>
+GUGGUUUGUUUUGUGUUUUU<miR-1603>
+AUGAAAAUGUGAAACCUCUCCCGC<miR-M3>
+GUGGGUAGAACUUUGAUUAAUA<miR-1012>
+AGAGCGAAGUGGGUGGGAAUGU<miR-1676>
+UGGAGAAGCAGGGCACAUGCU<miR164d,miR164f,miR164b>
+CGGUCGGCCGAUCGCUCGGUC<miR-341*>
+UAAUCGCGUACCGUUGCAUAGCCGUGGC<miR-1923>
+UACUAAGUAGAGUCUAAGAGA<miR1887>
+GUGGCUGUGGAAGCUCGCGAA<miR-928>
+UUCAGGUUCGUGCAUAAUGUGCU<miR-3387>
+UGUGGGUUGUCUGAGCAAGGG<miR-2378>
+CAGCAGCACACUGUGGUUUGU<miR-497>
+GCUGGGUGAUAUUGACAGAAG<miR3516>
+CCUGUGCCUGCCUCUUCCAUU<miR528a*,miR528b*>
+ACUGGCCUACAAAGUCCCAGUU<miR-193b>
+UAAGGUGCAUCUAGUGCAGUUA<miR-18b>
+UCUCUCUCAACCAACCAUAC<miR1029>
+CACUACAGGCUGCAAAAGGGUU<miR-1457>
+AUCACAUUGCCAGGGAUUACCAC<miR-23b-3p,miR-23b>
+UUGCAUAGUAAUAAAAGUGAUC<miR-153>
+UAGGUAGUUUAAAGUUGUGG<miR-196-5p>
+UAUUGCUUGAGAAUACACGUUG<miR-137>
+UUCUAACAACUACAGAAAGUGU<miR-2399*>
+UGGCAAGAUGUUGGCAUAGCUGA<miR-31>
+GACCUUUUGAUGUACUACUUUAAA<miR-968*>
+AGAGGUAUAGCGCAUGGGAAA<miR-202*>
+UAUUGCACUUGUCCCGGCCUU<miR-92b>
+UCAUAAGCCCACCACAUGUGG<miR810a>
+AGAGUUGUCAUGUGUCU<miR-214*>
+CAGUGCAAUGUUAAAAGGGCAU<miR-130b,miR-130a,miR-130c>
+GGCUAGCAACAGCGCUUACCU<miR-621>
+AUGCUGACAUAUUUACGAGAGG<miR-628>
+GCCACGUGACAUUCCCGCAGCUUC<miR-3373*>
+ACACAGUGAUGAGAGUUAGC<miR-4032-5p>
+GUCCCUGAGUGUAUGUGGUGAA<miR-670>
+UAUUGCACUAAUUUGCUUUUGA<miR-2063>
+GAUGGGUGUGAAUCUAGUGGUUC<miR-279*>
+GUAUGGUAAUUAAUCUCUGGUACA<miR-2045*>
+UCUGUUGUGCAGGGCUGUGCU<miR-1644>
+UGUGUUGUAAAGUGAAUAUCA<miR1518>
+CUGUUGCCACUAACCUCAACCU<miR-744*>
+UAUUGCACUUGUCCCGGCUUGC<miR-92c>
+UAGCCUCUCCUAGGCUUUGUCUGU<miR-282>
+UAAUUUUAUGUAUAAGCUGGU<miR-590-3p>
+ACAAACACCUUGGAUGUUCUU<miR782>
+AUAAUACAUGGUUAACCUCUUU<miR-655>
+UGCUGAGAGAAGUAGCAGUUACU<miR-883*>
+UAGCAGCACAGAAAUAUUGGCA<miR-195>
+UCGUGGCCUGGUCUCCAUUAU<miR-1204>
+UCACCCUGCAUCCCGCACCCAG<miR-3620>
+CCUACCGGGUUCAGUGUCAUACU<miR-65*>
+GGUGCAGUGCUGCAUCUCUGG<miR-143*,miR-143-5p>
+GUUGUAUUCUGCCCGGUAGUCCG<miR-M2-5p>
+GUGAGGACUCGGGAGGUGG<miR-1224-5p,miR-1224>
+CAGAAGUCGAUGUCGGGGUCU<miR-m88-1>
+AUGAGACUCAUGUAAAACAUCUU<miR-3672>
+ACUUUAAAUGUGUGUCCGUAUAUU<miR2124h,miR2124a,miR2124d,miR2124i,miR2124g,miR2124b,miR2124f,miR2124c,miR2124e>
+UUUAACAUGGGGGUACCUGCUG<miR-302c,miR-302c*>
+UAAUACUGUCAGGUAAGAAUACU<miR-8b>
+UGACCACCUUGAUUCCGGCCU<miR1050>
+UAGUAAUCCUUCUUUGCAAAG<miR476a>
+GUGUUGAAACAAUCUCUAUUG<miR-653>
+UAGGAAACCAGGCUUUAUUAGU<miR-2956>
+GCGACGAGCCCCUCGCACAAAC<miR-375*>
+UGGCAGUGAGCUAUCGUAGC<miR-4091-5p>
+UCACCGGGAUUCUCAGUGGAUU<miR-2240a>
+AGUGUACUUGGUGCUUGGGUU<miR-1504>
+ACCUAUAUUGCGAAUCAUCUAUC<miR-2686a*>
+UCACCGGGUAGACAUUAAUCAUG<miR-36b>
+GGGAGUGCUUCGUGCUUCUG<miR-3060*>
+AAAGUUCGUUCGGAUUUUUC<miR-2284f>
+UUUGUGACCUGGUCCACUACCC<miR-758>
+CGAGGAGUGUCCGUGCUUCAU<miR2586>
+UUUGUAUGGAUAUGUGUGUGUAU<miR-3149>
+AUGCACACUGAUGCUGAUUGU<miR1424>
+UGAGGCACGAGGCGGCUCUGA<miR-306-as>
+AAGUGAUCUAAAGGCCUACAU<miR-1245>
+CAUACAAGGAUAAUUUCUUUUU<miR-539-3p>
+GUUCUCCCGAACACUUCAUUG<miR395d*>
+UCCCAGGUGACACCCUGACUCA<miR-3090>
+AGGUGCAGAGGCAGAUGCAAC<miR530-3p>
+CAGAAUAAGGGCACACUAGAUUAACG<miR-3045a>
+UGGGAACGGGUUCCGGCAGACGCUG<miR-1292>
+UGGGCAUGUUUCUGAAAUUCGAU<miR-3277>
+UGAGUUUGGUGUACUGUGUGUU<miR-672>
+AAUGGCACUGCAUGAAUUCACGG<miR-228>
+CCCCGCCACCGCCUUGG<miR-4258>
+ACAACAAAUCACAGUCUGCCAU<miR-7a-1*>
+UCGUGUCAAGCUGUGUGCAUC<miR536>
+GAGGCUGUAGAGGGCAUCUGCU<miR-2294>
+UAUCACAGCCCCGCUUGGAACGCU<miR-2a>
+AAUCAGAACAUGACACGUGAUAGU<miR1520l>
+CAACCUGGAGGACUCCAUGCUG<miR-490,miR-490-3p>
+UAUCAUCGAUCACGUGUGAUGA<miR-392>
+UUAAUGUGUUGUGUUUGUCGG<miR2108a>
+UGACUGAGCCGUGCCAAUAUC<miR171c>
+CAACUUAAAAUCAGUUGGCAAU<miR4234>
+UUUGUAGGAUGAAAAGGUG<miR-4024-5p>
+UCAAAACAGACAAACAGGAAU<miR-1333>
+UCCUCCUUCGCGGGGUGCUUGA<miR-M21*>
+ACUUUAACAUGGAGGCACUUGCU<miR-302d*>
+AAGGGGGGGGGGGGAAAGA<miR2919>
+AGCUCUGAUACCAAAUGAUGGAAU<miR829.1>
+AGGCAAGACUUUGGCAAAGC<miR-266>
+UGCGUCAUAAACUUCCCAUAU<miR-3204b>
+UGAGCCGUGCCAAUAUCACAU<miR171b>
+UUUUGCUGCCCUUGUUUUGCA<miR2864.1>
+AAACAUGAAGCGCUGCAACA<miR-322*>
+UCUGGGCCCCGGUGGUUUAUGA<miR950-3p>
+AAUGGUCAUGUUUCUGUAUUG<miR-2539>
+ACUUUGUUAUGGCAUUCCUCG<miR1112-5p>
+UUCACAGGGAGGUGUCAU<miR-513a-5p>
+UAGUACAAAGUUGAGUCAUC<miR1137>
+GGAUUGUUGUCUGGCUCGGGG<miR166k*>
+AGUCAGGCUGCUGGCUAGAGUAC<miR-344c*>
+AAGUGCCGCCAUCUUUUGAGUGU<miR-371-3p,miR-371>
+UUGUUCGUUCGGCUCGCGUCAA<miR-375>
+GCCGGCGCAUUGUGGAGACG<miR-B2>
+UAGGCGUGUCGUCGUAAGCAGC<miR-rL1-31-3p>
+ACUGCCCCCUCCGCUGCUGCCA<miR-1913>
+CCAUAGAAGUCAUCCCACAGUGCC<miR-3558-5p>
+GAGCAUUGCAUGCUGGGACAU<miR-1955-3p>
+AGCGCCCAAGCGGUAGUUGUC<miR1423>
+UAAGGCUCCUUCCUGUGCUUGC<miR-700*>
+UGACCCCGGUCUGCUCGCUGG<miR1846c-3p>
+AGGCAAGAUGCUGGCAUAGCUGA<miR-31b>
+CGCCGCGUGGUAGCAUUAGAAC<miR-m01-4*>
+CGCCUUGUGACGACUAAGU<miR1154*>
+UCUGGAGGCACAUGGUUUGAA<miR-3475>
+UCGUAGCCGAUGUUCCACAGCAG<miR-3389>
+UGGGUGAGGAGGGAGAGG<miR-1369>
+GCGCUCACCUCGUGACCUUUGU<miR-124c-1*>
+UCGUCCUGAAAACGAAACGGAA<miR-59*>
+AGGACCUCACUUAACAGCUUAAGC<miR481a,miR481b,miR481c>
+AGACCUGGCCGAGACCUCAGC<miR-631>
+UGAGAUCAUUUUGAAAGCUGAUU<bantam>
+UGCCAAAGGAGAUUUGCCUCG<miR399e>
+UCCCUGAGACCAUUGACUGCAU<miR-125a>
+CAGGGUGUUGCGUGUUACUU<miR-4046-5p>
+GCCCUAGGGAUUCAGUUCCACA<miR-146b*>
+GUCCAGUUUUCCCAGGAAUCCCUU<miR-145>
+UGCAGUGACGUCUCUUCCCC<miR-2128>
+UACGUUGUCUGCUGGGUUUU<miR-2481>
+UUUGGAUUGAAAGGAGCUCUU<miR159e>
+UUGCAGCUGCCUAGGAGUGAUUUC<miR-1301>
+UAAAGGGUAGUGUGGUUCACAG<miR-rL1-20-5p>
+CCUUACGGCCCCUAAACCUUAUU<miR-2156b>
+UUUGGAUCCCGACCCCUCUUC<miR-H7*>
+UUAUUGCUUAAGAAUACGCGUA<miR-137>
+CGGCCUAAAUUACUACAACACG<miR1162*>
+GCGGGAUGGGCUGGGCCGGG<miR-2974>
+AGGCCAAUGGCAGUCAGAAAU<miR-1401*>
+GCUGCACCGGAGACUGGGUAA<miR-3130-3p>
+ACGAGGUUAGACGACGAGUG<miR-3506>
+GACCUCUGGAUGUUAGGGACUGA<miR-1927>
+AAAUGAAUCAUGCAUUGACUACAUG<miR-3238>
+CCUCCAUCUAUUCUCCAUCUGACG<miR-2211*>
+ACGCAGCAACAGCGGCCGCCUCC<miR-3314>
+CCGGUUUAGUCACUUUCAC<miR161.1*>
+CUCACUGAUGAGCAGCUUCUGAC<miR-677>
+AGAGGUAGUGAUUCAAAAAGUU<let-7d>
+UCCCUGAGUAUAUGUGGUGAA<miR-670>
+ACAAUGCCAAUGGAGACGGAU<miR1159.2>
+CUGGAGUCUAGGAUUCCA<miR-4309>
+GCUCGAGGAAGCUGGAGAUGA<miR-2388>
+GCUGCGCUUGGAUUUCGUCCCC<miR-191*>
+AGGUCAGCUUUGCCAUCAAC<miR-4097-3p>
+GAAAUCGUUGUCAUGACUGAGC<miR-1422h>
+UGACUAGAUCUACACUCAUUGA<miR-279b>
+UAGACCGAUGUCAACAAACAAG<miR833-3p>
+AGGCACGGUGUCAGCAGGC<miR-564>
+UGUCUGCAUACAAAAAACAGAA<miR-3269>
+UUUAGAAUUCCUACGCUUUACC<miR-927>
+AGGGGCAUAGGGCAUGGGAAAA<miR-202>
+UGUCUGUUUGUGCGCUGGUAGAAGA<miR-3384>
+UGUGACUGCAUUAUGAAAAUUCU<miR-3118>
+UCUUUGGGAUUUAAUAGAGCCGGU<miR-3024>
+UCUUACAGAUCAAGUUGAUUCGGA<miR4343b>
+CGGUUUACCGUCCCACAUAC<miR-3563-5p>
+CGCGGGCAAAAAAUCCAAUGGC<miR-B8-5p>
+UGUAAACACCCUACACUCUCAGCU<miR-30f>
+UAUUUUGGGUAAAUAGUCAU<miR1534>
+UGAGGGCAGGACCGUAUGAGGUGU<miR-2443>
+UAUGUAGUAUGGUCCACAUCU<miR-380*>
+UAUUGCACAUACCCGGCCUUG<miR-1492>
+UGCUUGUUUUUGGAUGAGCUUGC<miR-1632>
+GAAACGUUCACUCUGCUCUUCU<miR-3642>
+GUUGCUUGGGGUAUUACUAU<miR-754c>
+GGGGGUUCCCCGGUGCUCGGAUC<miR-615-5p>
+UGGCUUUGAGCUCGUCCACCCAUU<miR-3267a>
+UGUGCAAAUCUAUGCAAAACUGA<miR-19a>
+UUGGGGAAACGGCCGCUGAGUG<miR-2110>
+UCAGCCACGGCUUACCUGGAAGA<miR-3058>
+CAUCUUAGCAGUAUCUCCCAU<miR-1941-3p>
+GCUUCUCCGGUCUCUCCUCCUUC<miR-207>
+GGCAAUAACUUGAGCAAACA<miR773b*>
+GAAGGAAAAGGAGCUGACUGGG<miR-1612>
+CGCCAAGCUAUUUUAAGCAAUGA<miR-3372>
+UGUCAGAAGAGAGUGAGCAC<miR156c>
+UUAGGGCCCUGGCUCCAUCUCC<miR-1296>
+AGGCUGCAGGCCCACUUCCCU<miR-3552>
+CCCUCAUUGUACAUGCUGUGUG<miR-460b>
+ACCUGGCAUACAAUGUAGAAU<miR-221*>
+AUGAAGUGUUUGGAGGAACUC<miR395o>
+UUUCCACAGGUGAUGAGUUAC<miR-587>
+UGAAGCUGACAGCAUGAUCUA<miR167b>
+UGCAUCAUGCGUGACCUCCCC<miR-1421ac-2*,miR-1421y-3*,miR-1421aj*>
+GGAGAGUGGUCGGAUUGUAGCUC<miR3469*>
+UCUGCUCAUACCCCAUGGUUUCU<miR-767-3p>
+UCCCUGAGACUGAUAAUUGCUC<miR-125b>
+UCUAGAAAGGGAAAUAGCAGUUG<miR1508a>
+UGGGGCUCAGCGAGUUU<miR-4283>
+UGGAGAAGCAGGGCACGUGUG<miR164h>
+UGACGCGUUUGAUAGCAGGAUC<miR908.2>
+AAUGGCACUGGAAGAAUUCACGG<miR-263,miR-263a>
+CAGAGAGAUAACAGUCACAUCU<miR-881*>
+CACCUCCUCUCUCCUCAGGU<miR-1224>
+CUCGGAGAGGGAAGAACGCGGUG<miR-1713>
+GAGGACUUGAGGGAACAGUUAGU<miR-2695>
+AUAAAGCUAGGUUACCAAAGCU<miR-79>
+UCCAGAGGCAAAGGAGCACUGCU<miR-1690*>
+UUGACCGUUCAUAUGAACCCUG<miR2587b,miR2587f,miR2587e,miR2587a,miR2587c,miR2587d>
+CUCAGGAGAGAUGACACCGAC<miR1432>
+GGGAGCCUCGGUUGGCCUC<miR-2904>
+ACCACAGACAGUAUCUAACCUGA<miR-3294>
+CAACCAUUGGAAUUUCUCUAUU<miR-1829a>
+ACAGUAGUCUGCACAUUGGUAG<miR-199a-3p>
+UCACCUUGGUAUCAAAAUUUGCG<miR-1471>
+CUUGCAACUCUGCCUUGGCUUA<miR3698>
+GUGAAGCGUUUGGGGGAAAUC<miR395u>
+GUUGCACGGGUUUGUAUGUUG<miR1429-3p>
+GUUGCGGACAGCGCUAGGUCGG<miR-1932>
+UAGGGAACCCCAUUCCCAUAAA<miR1317-5p>
+CCAGGGAGGCGUGCCUGGGC<miR-H1>
+AGAUUGAGCCGCGCCAAUAUC<miR171d,miR171c,miR171e,miR171g>
+CAUGGUGGAAUCGCAUCCAGG<miR1038-3p>
+UGUAAACAUCCUUGACUGG<miR-30e>
+UGAAUACAUCUGCUGGUUUUUAU<miR-2002>
+UCUUAGAUCUACAAUGUCACA<miR1028a-5p>
+GGGGGUCCCCGGUGCUCGGAUC<miR-615,miR-615-5p>
+UAGGUCGGGCCUGGGGGGCAGG<miR-2014*>
+UAGGUAGUUUCCUGUUGUUGG<miR-196b>
+UCUUUGGUUAUCUAGCUGUAUG<miR-9-5p,miR-9>
+UAAGGCACCCUUCUGAGUAGA<miR-506>
+UCAGUAACAAGGAUUCAUCCUG<miR-459>
+AGGUAGUUGGUUGUGUUG<miR-4090-3p>
+CGAAAGACGAGGUUGCCGGCU<miR2624a,miR2624b>
+CUCCCUCAUCUGUCUGCCCC<miR-1238>
+CAAGCUCGUUUCUAUGGGUCUG<miR-99a*>
+UAGCCGCAGAACUGUUCGGGCAU<miR-3373>
+UGCACUGCCUCUUCCCUGGCU<miR408b>
+AGGACCGAUCCGAUCCCCAGGA<miR-2577>
+GUUGAGGCGAGUUGAAGACUUA<miR-727>
+UUCAGAGUCUAAACAUGGUGU<miR3442>
+AACCCGUAGAUCCGAUCUUGUG<miR-99,miR-99a>
+GUGACAUCACAUAUACGGCGGC<miR-489>
+UUAAUGUGUGAAAUUGGUAG<miR-4159-3p>
+AAUGUAGAAAAUGAACGGUAU<miR3515>
+GCUCAGCAGCACUCUUUCUCA<miR-1376*>
+UGAUUGGUACGUCUGUAGGUAGA<miR-509b>
+UCAGGUGUGGAAACUGAGGCAG<miR-3934>
+UGCCUACUGAGCUGAAACACAG<miR-24-2*>
+GAAAAUAUCAUGAAUACGACAAU<miR-2283>
+UGAUUGAGCCGCGUCAAUAUC<miR171b>
+CUAGUUUCACUUGUUCUGCAC<miR413>
+ACGGACGAUAGUCUUCAGCGGCC<miR-278>
+GAAGGCGCUUCCCUUUGGAGU<miR-524,miR-524-3p>
+UAUCACAGCCAGCUUUGAUGGGC<miR-2c>
+CAGACUAUCAGUACGUACGCUG<miR-2827>
+AACAAGACGUGAUGACGUGACACU<miR4387a>
+UGGAAGUCGCACGUCAUGCCGU<miR-1421d>
+AACCCUGUAGACCCGAGUUUGG<miR-10-5p>
+CUGAUGUUUUUAGAAUUAGCCC<miR-2034*>
+UGCCAAAGGAGAUUUGUCCGG<miR399j>
+GGCAUGAUGUAGCAGUGGAG<miR-270>
+AAAGGGGUCCGUAACCAAAGG<miR-H7-5p>
+UUGCGGAAGAAACCAGACUUUU<miR-1367>
+UAUUGCUUAAGAAUACGCGUAG<miR-137>
+AAUUGCACUGUAGCAAUGGUGA<miR-367>
+AAUGGGUUUUUGGAGCAGG<miR-1246>
+UGCUGAGGAUUGCGAACACAUGUG<miR-3298>
+UGGAAUGUCGAGAAAUAUGCAU<miR-1a>
+GAAGUGCUGGGUGUUUGGGUGA<miR-1378>
+UUCAACGGGUCUUUAUUGAGCA<miR-95>
+AACUGGCCUUUUAAGUCCCGCA<miR-193>
+CAAUUUAGUGUGUGCGAUAUU<miR-32*>
+UCGUGCAAUGGACUCAAUUUCGA<miR-2583*>
+AAUCAUGUGCAGUGCCAAUAUG<miR-96*>
+UAUUUAGAAUGGCACUGAUGUGA<miR-465a-5p>
+ACAUUAGCCAAUCACAAUGCC<miR2600>
+GGGGUCAAACUGUACGUUCUAUG<miR-965*>
+GUCUCCGUACACCGGACCAUCG<miR-M23*>
+CUGAGCUGAGGAGGACCUGUGA<miR-2410>
+UGUAAACAUCCCCGACUGGAAG<miR-30d>
+AGAGGGUGGCCUGGUAUCUG<miR-2368>
+GACAUUUCUAAGUGUCUAUUAU<miR-96b*>
+UACAUACAUGCACACAUAAGAC<miR-466o-3p>
+CGCCUGGCUCCUUGUAUGCCA<miR160h>
+AAAUUGGCAGAGCUUCCUCUU<miR-2473>
+UUGUCGCCUGGUCGUUGUGGG<miR3695>
+UGGUGCUAUGGUCAGGGGUAGA<miR-3070b-3p>
+AGGCGGGCCGGGGUUGGA<miR-2899>
+GGGCGACAAAGCAAGACUCUUUCUU<miR-1273>
+AUGACCUAUGAAUUGACAGACA<miR-215>
+UGCUUCCUUUCAGAGGGU<miR-516a-3p,miR-516b*,miR-516a>
+UGAGAAUGGUAACCAAUACA<miR-4003d-3p>
+UAUUGCGCUUGUUCCGGCCUGU<miR-92d>
+UAACUGUGGCAUUUCUGAAUAG<miR-881>
+CUCCGCAGCUUUUGCUGCAU<miR-4093-5p>
+ACAAUGGAGUGAAGUGCAACAGAA<miR1875>
+CAAGGGUCACCCUCUGACUCUGU<miR-540-5p,miR-540*>
+GGUUGUUUUUUUUCUUUUUC<miR-2325c>
+AGGUCAGAGGUCGAUCCUGG<miR-540-3p>
+UGAGGUGCACGUAAGAUAACUC<miR1449>
+GUGGGCUGGGGAAGGGCUGCUGGGU<miR-2978>
+UGUCAUGGAGUUGCUCUCUUUA<miR-281>
+UAACUAUUUUGAGAAGAAGUG<miR830>
+AGGGUUUCAUGUGUAUCUCUUG<miR-1605>
+UUUUGAUUGUUGCUCAGAAGGC<miR-315>
+AUCACAUUGCCAGGGAUUACCA<miR-23b>
+UAAUGUGAUGAUGAACUGACC<miR418>
+UUACAGUUGUUCAACCAGUUACU<miR-582,miR-582-5p>
+AAGAGAAUUGUAAGUCACUG<miR4413>
+UAAUACUAUAAAGGUUCAAGUCA<miR-3355>
+AUCUGAAGCUGGAUGUGUUAU<miR-2f>
+GACAUCGAAUCAGACAGUUUA<miR-8a*>
+GGUUGGCUUGCCUGUGCCUGU<miR2078>
+CCACGGUUGAAUAAGGUACCAUA<miR-3053>
+CAGGAACCAGCUUUCGGCUCU<miR-1588>
+CUGUUGGUCUCUCUUUGUAA<miR394a-3p,miR394b-3p>
+GAGCUCCUCUCAUUCCAAUGA<miR159f*>
+UCAAUUGUUUGUGGACUUACAG<miR-2220>
+CUUCUUAAGUGCUGAUAAUGC<miR868>
+GAGGGCCCCCCCCAAUCCUGU<miR-296>
+UUGCAUAGGUACAUUGGUCAGU<miR-2061>
+UAGGCCAGUGAUUUCACAGUACG<miR-2554>
+CCCUGUGCCCGGCCCACUUCUG<miR-1914>
+UUAAGACUUGUAGUGAUGUUUAG<miR-499>
+AAGAGAGCUAUCCGUCGACAGU<miR-281*,miR-281,miR-281-2*>
+UUUUCUCCGGUGAGCGUAGCUGCC<miR-H13>
+AUGAUUCGACUCAUAUGGUG<miR-2197>
+UUUGUGCGUGUGACAGUGACAAU<miR-210>
+GUCACUUUCACUGCAUUAAUC<miR161.2*>
+CAGGCACGGGAGCUCAGGUGAG<miR-3622a-5p>
+CGGGCCUGACCAGUCUCAAGAC<miR-3091-3p>
+UGGUUCUAGACUUGCCAACUA<miR-182*,miR-182>
+AUAAAGCUAGAUAACCG<miR-9*>
+AACCCGUAGAUCCGAUCUUGU<miR-99,miR-99a>
+AUCAUAUCAGAUUUGCAUUAUU<miR-277c*>
+GCUUCUUACUUGAUGGUAAGAGA<miR-8b*>
+UGUUGUCUGACAUGGAGGGUC<miR1149.2>
+UGAGGUAUCUUAGUUAGACAGA<miR-793>
+GAUCUUUUGAGAGGGUUCCAG<miR2938>
+UUCAAGUAAUUCAGGUG<miR-1297>
+AGAGAAUUGAAGAGAGUGCAU<miR1023b-3p>
+UUUUUGGUUGUUAAGUUCCAUU<miR-2760>
+UGGAAUGUAAGGAAGUGUGUG<miR-206>
+AUAAGACGAACAAAAGGU<miR-208b-3p>
+UUUGUACUCCGAUGCCAUCCAC<miR-238>
+UGCCAAAGGAGAUUUGCCCGG<miR399,miR399a,miR399j,miR399h,miR399c,miR399b,miR399e,miR399f>
+CGUGGGCCUGACGUGGAGCUGG<miR-770-3p>
+UAAUUCCACCAAUAACUUCAGC<miR856>
+CAAAGAUACGCAUGGGCUGAGGG<miR-H15>
+AGCUGGUGUUGUGAAUC<miR-138>
+UGGCACAAUACCUGUAUGUAGA<miR-784>
+AAUCCUUGGAACCUAGGUGUGAAU<miR-362-5p,miR-362>
+ACAGCCUAAACCAAUCGGAGC<miR1140>
+UCAUUGAGUGCAGCGUUGAUG<miR397a,miR397b,miR397>
+UUGAAGAACUGCAGGUGGUGGAU<miR-1497a>
+UGAAACUUCGCUGGAACAGG<miR-4000f-5p>
+UGAAUAUACACACACUUACAC<miR-669e*>
+GUAAGUUUGGAGUGCCUGGGCUA<miR-2501>
+ACAUUCUUAUAUUAUGGGACGGAG<miR1120>
+UAAAGCUUGAUUUGAUUUUCA<miR-2551>
+CAGCGAGGUAUAGAGUUCCUACG<miR-276*,miR-276a*>
+UGGGGUGUGGAAUGAAUCCUU<miR-1708>
+AGUAUGUUCUUCCAGGACAGAAC<miR-567>
+UACCCGUAUAUUUUUCUGCCGAG<miR-55>
+UAAAGUGCUUAUAGUGCAGG<miR-20a>
+UUAAAGUUGAAGUUUGGAAAAU<miR-991>
+CCCUGUGGUCUAGUGGUUAG<miR-2476>
+AAGGGAGCUGGCUCAGGAGAGAGUC<miR-1966>
+GUUCUGCUCCUCUGGAGGGAGG<miR-1904>
+GGCUGAGGUGGGCUCCCU<miR-1335>
+UAAGUACUAGUGCCGCAGGAG<miR-252>
+AUCGGUGAGCUAAAAAUAGAAU<miR-2282>
+UCUCCGGGAAUCCAAUGCGCC<miR949>
+GUCUGUCGGAGAAGCAAGUCGGAG<miR3636>
+AGAUAGGACUUGAAUCACUG<miR-4042-3p>
+UGAGCGCCUCGACGACAGAGCC<miR-339>
+UCUACAAAGGAAAGCGCUUUCU<miR-1283a,miR-1283>
+UGUAAACAUCCUUGACUGGAAGC<miR-30e>
+UGGGAGCUGGACUACUUC<miR-4300>
+GCUCUCUAAGCUUCUGUCAUC<miR156b-3p>
+AGGCUUGAAUUGUGAUCUCA<miR-753e*,miR-753b-5p>
+UCGUACCGUGAGUAAUAAUGC<miR-126>
+AGAGCUUUCUUCGGUCCACUC<miR319b*>
+AAGCAGCUGCCUCUGAGGC<miR-646>
+UCCACAGGCUUUCUUGAACGG<miR396h,miR396g,miR396i>
+CCUCAGGGCUGUAGAACAGGGCU<miR-1266>
+CUUCUUAAGUGCUGAUAAUGU<miR868>
+UGCAGAUCAGACUAUAUGUAAAC<miR-3398>
+UUCUCUUCUCUCGCGCGUGGCC<miR2930>
+UCCUGGGACAUCUCUCUUGCAG<miR-1015>
+UAUUCGAGCCAAUAAGUUCGG<miR-314>
+UAAGUCAUGAAAAGGUUUUUUU<miR-1422e>
+ACAGUUCUUCAACUGGCAGCUU<miR-3600>
+UCACUGGGUGCAUGAAGAUUG<miR-2733g>
+AAAGUGCUUCCUUUUAGAGGGU<miR-520c-3p>
+AGAGGUAUAGGGCAUGGGAA<miR-202>
+UUCACAAGGAGGUGUCAUUCAU<miR-513a>
+AAAACCUUCAGAAGGAAAGGA<miR-703>
+UUGUAGACCUUCCUGCCGCAAAC<miR3451*>
+CUAAGUACUAGUGCCGCGGGAG<miR-252a>
+AAUCCUUUGUCCCUGGGUGA<miR-501>
+CAAAGCGCUCCCCUUUAGAGG<miR-518b>
+UGAGAUGAAGCACUGUAGCUC<miR-143-3p,miR-143>
+UUUAAAGGUGUUAAUGUGUGA<miR1106>
+AUGACCUAUGAAAUGACAGCC<miR-215>
+CGAGUCAGUCGAUUUCUUCGA<miR-3392>
+GUCAUUUUUGUGAUCUGCAGCU<miR-153*>
+AUAAGUAGGUUCUUAUUCGGCU<miR-2797b>
+CUAAGUACUAGUGCCGCAGGUGU<miR-252a>
+AGGACGUCCCCUUACGGGA<miR1143*>
+UUGAGCCGUGCCAAUAUCAC<miR171b>
+UACUCCAGAGGGUGUCAUUCACA<miR-508-5p>
+UUCGCAAGGUUUCCUCAAGAUC<miR-2241b>
+UAGCAGCACAGAAUGGUUUGUG<miR-15a>
+UCUUCGUGUUCCAUUACUCUUAC<miR-3233>
+UACCUAAUUUGUUGUCCAUCA<miR-463*>
+CGCACGUCGAUUGCUCUCUAG<miR-rR1-7-3p>
+UGACGUGUCUUCUAUUUUUAGGAA<miR478d>
+AGUGCUCGGAGAUAUUGUCACG<miR-1419f*>
+UGAGGUAGUAGAUUGUAUAGUU<let-7f>
+GGUCAUGCUGCUGCAGCCUCACU<miR167d*>
+UGUCAGUUUGUCAAAUACCCC<miR-223>
+ACGCCUGGGCUCUCUGGGUACC<lin-4*>
+ACCCGCGUCUACCCGGUUCCGUGUACUGGAAAU<miR-2951*>
+AGGGACGGGACGUGGUGCAGUGUU<miR-92b*>
+UAACACUUCAUGGGUCCCGUAGU<miR-BART9>
+GGGUCGACAUGAGAACAUAUG<miR398c*>
+UUUGUCUACAAUUUUGGAAA<miR158b*>
+UGUGUGUUCCGCUUCUUCUUU<miR2082>
+ACUCCAGCCCCACAGCCUCAGC<miR-766>
+AAAAGUGCUUACAGUGCAGGUAGC<miR-106a>
+UAUAUUUCCAUUACCUGAAUGC<miR-2702>
+AAUUCUUCUACUGCGCGAGGG<miR-2545a>
+UAUUCAGAUUGGUGCCGGUCACAU<miR-871>
+CGUCAACACUUGCUGGUUUCCU<miR-505>
+GCCGAGGAGCAGGACGUG<miR-1345>
+UACUCACAUGGUUGCUAAUCA<miR-742*>
+UGCCAAAGGAGAUUUGCCCUG<miR399d,miR399a,miR399h,miR399c,miR399i,miR399f>
+UCUCCACCCUCCUUCUG<miR-1952>
+AAAGUCUUCACUACUUUCAGUU<miR-2000>
+CGCACCACUAGUCACCAGGUGU<miR-BART3>
+AUCACAUUGCCAGGGAUUUCCA<miR-23a>
+GCUGGUGCAAAAGUAAUGGCGG<miR-548q>
+AUGGUGGCACGGAGUC<miR-546>
+ACAUGCUGGAUCUACUUGAAG<miR862-3p>
+ACGGGGCGUGGUUGGUGGGCG<miR-B4>
+AUCUGGAGGUAAGAAGCACUUU<miR-516,miR-516b>
+UGGGGCGGAGCUUCCGGAGGCC<miR-3180-3p>
+AGGGGUGGUGUUCGGACAGCUGCGU<miR-608>
+UUUGUUCGUUCGGCUCGCGUUA<miR-375>
+UCACAAGUUUUGAUCUCCGGUAU<miR-125*>
+AAGGUUACUUGUUAGUUCAGG<miR-872>
+CGAAGUCUUUGGGGAGAGUGG<miR447b*>
+UUGGCCAUGGGGCUGCGCGG<miR-3187>
+AAACAUCUGGUUGGUUGAGAGA<miR-2483>
+AUUCCUAGAAAUUGUUCACAAU<miR-384-3p,miR-384>
+CUGGUUUUCAUAAUGAUUUGACA<bantam*>
+AUUCAGGGACAAAGUGUGCG<miR2654>
+UUCCCAAUGCCUUCCAUGCCUA<miR2118f>
+UGAGCCCCUGUGCCGCCCCCA<miR-1225>
+UGUGUCACUUGACGACCACUGU<miR-597>
+UCUUGGAGUAGGUCAUUGGGUGG<miR-432>
+ACAUUAUGGGACGGAGGGAGU<miR1436>
+CAAGUAAAUCUCGUGCGGUUUG<miR-2767>
+CGUGUUCACAGCGGACCUUGAU<miR-124*>
+AUCACAUUGCCAGGGAUUA<miR-23b>
+UGGCAAUAAGGCAAUCGUUGC<miR915>
+UAAAGCAACUUCAGACCAUAGU<miR-2513a>
+AUAUACAUACGCACAUACCCAU<miR-297a-5*>
+AGAAAACCAGCUUCCAGAUCU<miR1860-5p>
+AAGCCCUUACCCCAAAAAGU<miR-129*>
+UACUUCUCCGUGCCACAGUA<miR1094a>
+UAUGUAAUGUGGUCCACGUCU<miR-380-3p>
+CUUCUCCUGGCUCUCCUCCCUUU<miR-207>
+UACCAAGUUUAUUCUGUGAGAUA<miR-464>
+UAUGGCACUGGUAGAAUUCACU<miR-183>
+UAAAUGCAUAUUCUGGCACUAA<miR-277b>
+AGAUAUUUUGAGUGUUUGGAAUUG<miR-3145>
+CAAAGCGUUUGGAUUCUAA<miR-927*>
+AUUCUGCAUUUUUAGCAAGCUC<miR-544-3p>
+CCACUCUGUCUCGGAUCCUGGCA<miR-2461-5p>
+UGUCACAUCCUGGUUGGACAUGAA<miR1520r>
+CAGUCGAGUAUCCUUAGGAACC<miR-237*>
+UGUCCAGUGCCGUAUAUUGCAG<miR-978>
+AAGUUGACGUACGUACGGAUUGAC<miR4373>
+AGGUGGUCACUUGAGUUGCAGU<miR-1421s>
+AAAAUGGAUCUUGACAAAAC<miR-4072-3p>
+UGUUUGUUGUACUCGGUCUAGU<miR833-5p>
+GCAGCUUGCAAGUCAUUUUCUUAG<miR-3400>
+UGAAUGAACCGAGCCAACAUC<miR171e>
+CCUUAUCAUUCCCGCGUCCAG<miR-184*>
+CACACCUCACUAACACUGACC<miR-253*>
+AAAGAUGAUGAGUUGCUGAUG<miR-1719>
+CUACUCUGUAUUAGGCACUUAG<miR-2319a>
+GAGCUCCUUGAAGUUCAAUGG<miR159b*>
+CGAGGGUAGGCGCAGAGGAAAUC<miR-M28*>
+CACAGCUCCCAUCUCAGAACAA<miR-674-3p,miR-674*>
+CACAUGUUGUUAACAUGG<miR-4110-3p>
+UGUCAUGGAGUUGCUCUCUUUGU<miR-281>
+CAGUCAGCUGUGGGUGGGUGGCA<miR-1586>
+CUCGGUGGAAGAUCGUCCCU<miR-2774a>
+CUGCAAAGGGAAGCCCUUUC<miR-518a-5p,miR-527>
+UAUACGGAUGCGAUGACGAUCGGCU<miR-3340>
+AUGUAACACGGUCCACUAAC<miR-411>
+UGGAAUGUGGCGAAGUAUGGUC<miR-1>
+CAACUCUGUGGUUUCCUUUACUCAUAG<miR-4336>
+AGCACCAUUUGAAAUCAGUGCUU<miR-29b>
+UUAUGAUGUAGAUUCUUCAU<miR902h-5p,miR902i-5p>
+CUUCCGUCGGAGCUGGGUAGA<miR3454b*,miR3454f*>
+CAGUGCAAUAGUAUUGUCAAAGC<miR-301,miR-301a>
+UAAAGUAAAUAUGCACCAAAA<miR-559>
+UAUCACAAGGUGCGAUAAUUG<miR1076-5p>
+CGGCUUCUCGGUACCUGCGUU<miR-1580>
+AGUUACAGACAAGAGCCUUGCUC<miR-600>
+GAGGGAAGAGAAAUGGUCUGCU<miR-1778>
+UGUAAACAUCCUACACUCAGCU<miR-30b-5p,miR-30b>
+UCACCGGGUGAAAAUCAGGGC<miR-35c>
+UGAUUCAUUGCCUGGCUCUGC<miR-1591*>
+GCUUACUCUCUUCUUGUCUCC<miR156g*>
+AAGGGAAGAAGGAAGCUGGAUU<miR-2406>
+UUUCCAGCAGGCUUGAUGGAG<miR-2983>
+AAUGCACCCGGGCAAGGAUUUG<miR-501-3p>
+AAAGGUGGAGGUGCGGUAACCU<miR-M1-7-5p>
+UGCAUUUGCACCUGCAUCUC<miR530>
+UGUUCUCUUUGCCAAGGACAG<miR-2117>
+CAAAGCGUUUGGAUUCUGAAAC<miR-927*>
+UUUUUGCAAAUUAAAACCCCAA<miR4238>
+CAAGUUUGUCGCCAUACUUC<miR-4010-3p>
+UCACCAGAAUGCUAGUUUGUAG<miR-UL22A*>
+UUGGUCCCUAUCAACCAGCUGU<miR-133>
+AAACGAACAAGAAACUGAUGA<miR837-3p>
+UUAGAUGACCAUCAACAAACU<miR827>
+CCCUGAACUAGGGGUCUGGAGA<miR-345-3p>
+AGGCAAGAUGUUGGCAUAACUGA<miR-31a>
+UGAGGUAGGCUCAGUAGAUGCG<miR-48>
+AGAAUUUGUGGGAAUGGGCUGA<miR482a-5p>
+GUGAAGUGUUUGGGGGAUUCUC<miR395w>
+UAAAUUUCACCUUUCUGAGAAG<miR-513a-2-3p>
+GGAAUCUUGAUGAUGCUGCAU<miR172b,miR172d,miR172e>
+ACAAGUCAAACAUGCCUUGGCCCAUUCA<miR-3388*>
+AUAAGACGAGCAUAAAGCUUGU<miR-208>
+UAACCUCUGAUCCUUCCCACAG<miR-3103>
+AUAGCUCUUUGAAUGGUACUGC<miR-458>
+UAACUAGCCUUCCCGUGAGA<miR-UL22A>
+UGACUAGAACCAUACUCAGC<miR-279>
+CCUGGAAAUACUGAGGUUGUG<miR-875-3p>
+CCCUGGAGUGACGGGGGUG<miR-4334>
+AAUCACAGGAUUAUACUGUGAG<miR-308>
+UAGCACCAUUUGAAAUCGGU<miR-29c,miR-29a>
+GGGGUUCCUGGGGAUGGGAUUU<miR-23a*>
+UGGCAGUGUCUUAGCUGGUUGU<miR-34a,miR-34>
+GUGUGCCGAAAUGCUUCUGCUA<miR-147b>
+GACUGCUCAUGGCUGCCUGUUC<miR-1567>
+UCUUAGCUUGGCAAUAAAAUAU<miR-2280>
+GAAGGCAGCAGUGCUCCCCUGU<miR-3714>
+UAAUCGAUAGAUUUUGACGAGAGC<miR-3306>
+AUUGUACUUCAUCAGUGCUCUG<miR-305>
+AUUGUUACACCGCGCCGCAAAAG<miR-2071>
+UAGCACCAUUCGAAUUCAGUGC<miR-285>
+CCCAAACUCGAAGGAGUUUCA<miR-997>
+UGACAAUACUAAAGAGUCAAGCG<miR-96a*>
+ACCCUGCAGCCAAAGAAGCUA<miR-2331*>
+UAAUUGAGCCGUGCCAAUAUC<miR171f>
+AUUUGUGCUUGGCUCUGUCAC<miR-2113>
+UCUGGUAUUGACUGUAAUAG<miR-2754>
+AGUCUCUCACAUGGCUGGUCUAGC<miR-980*>
+GUGAGUGCAGGCUGUUUAUUG<miR-3645*>
+CGUGCCACCCUUUUCCCCAG<miR-1227>
+GUAGCUUAGCGAGGUGUUGGUA<miR895>
+UACUGCAUCAGGAACUGACUGGA<miR-217>
+CUGUACAACCUCCUAGCUUUC<let-7a*>
+AAAUUGCUACCAGGUUGGAUGU<miR-1420d>
+UGUUUGAGUUCUGGAUCUGGA<miR-2772b>
+AGGCAGUGUAGUUAGCUGAUUGC<miR-34c-5p,miR-34,miR-34c,miR-34b>
+CCGAGGUUUUCUGGAUACAUU<miR2106>
+UAUACAAGGGCAAGCUCU<miR-381>
+UUGGCAUUCUGUCCACCUCC<miR394b-5p,miR394a,miR394a-5p,miR394b,miR394>
+UCACUGGGUGCGUGAUGAUUGU<miR-2733b>
+CGUUUUGCAAAUUCGCAGGCC<miR1428a-5p>
+CUUCCUCGUCUGUCUGCCCC<miR-1238>
+UCAGAGAAAAAGAGAUUUUUAU<miR-3239>
+AUUUAACUCAAGUGAGCAUUGU<miR2101-3p>
+ACCCCAAUGAGCUUUUGACC<miR-2284h*>
+UAUCAGAAGACAGGUAGGCAGA<miR-2439>
+UGCAACAUCACAGUGACCACAU<miR-2072>
+CAACCACCUCCCACAAUUUCA<miR-M1-6*>
+AGAGCAAGCCCGUAAGCAGCGU<miR-3105-5p>
+AAGGGGAUUGAGGAGAUUGGG<miR815b,miR815a,miR815c>
+GCAUUGUGCAGGGCUAUCA<miR-4289>
+UCGUUGUCUGUUCGGUGGCAG<miR-1772>
+UUACAAGAAGGUGCCAUUCAU<miR-513e>
+CAAUCAUGUGUAGUGCCAAUAU<miR-96*>
+AUCAAUGCGAUCCUUUUGGAGG<miR393b*>
+UAAGAUCCGGACUACAACAAAG<miR850>
+UUCUUCGUGAAUAUCUGGCAU<miR780.2>
+CUAAGUACUCGUGCCGCAGGAG<miR-252a>
+UAAUGCCCUGAAUGAUGUUCAAU<miR-786>
+UAGUACGGCCAUGACUGAGGGC<miR-2952>
+UGCACACUCAUAUCUGUAUAAC<miR-1390*>
+UUACUGUAGGGCCUGCGGCUU<miR-2469>
+CUGUACAGGCCACUGCCUUGC<let-7g*>
+UCUCUGAGUACCAUAUGCCUUGU<miR-3921>
+AAAAGUAAUUGUGGUUUUGGCC<miR-548b-5p>
+AGGAUGACGGUGGGGCUGGUGA<miR-1934*>
+AGAAAAUCUUGUGUGGAUUGAU<miR-1422b>
+CCAGUUUUCCCAGGAUU<miR-4328>
+UAAUACUGCCUGGUAAUGGUGA<miR-200>
+UCAGACAUCUGCUCGGCGAAUU<miR-2047*>
+GCAGCUUUCAGAUGUGGCUGUAA<miR-693-3p>
+AAGGAGCUCACACUCUAUUGAG<miR-28-5p>
+UGAUAUGUCUGGUAUUCUUGGG<miR-50>
+AAGAUGUUCUUAAUGUAGGUU<miR-2686c>
+CAGAGCAGUGGCAAGAACGCAU<miR-2397>
+UCAGAUCUAACUCUUCCAGUUCU<miR-750-3p>
+UGGGUCUUUGCGGGCAAGAUGA<miR-193*>
+GGCAAGGACAGCAAAGGGGG<miR-211*>
+CUCGCCGGGGCUGCGUGCCGCCAU<miR531>
+UCGAAUUUUUACCCUUUUUUGGUCU<miR-3425>
+GACAUGAAUGCAGAACUGGAA<miR2086>
+AAGCUGCCAGAUGAAGAGCUGU<miR-22>
+AGGUUACCCGAGCAACUUUGCAU<miR-409-5p,miR-409>
+ACGCCCUUCCCCCCCUUCUUCA<miR-1249>
+UUCAAGGCAAGUUUUUUCUUGA<miR-1422m>
+UUUCCAUAGGUGAUGAGUCAC<miR-587>
+AGUCAUACACAGAGUGAGCAGCG<miR-3218>
+UUGGGCUGAAGGGAGCUCCC<miR319i>
+UUAAUCGACCAAGUGGGUACUA<miR2672>
+CGGAAAACUCGCACGUG<miR-2147b>
+UGACUAGAUUACAUGCUCGUCU<miR-996>
+AAACAUUCGCGGUGCACUUCUU<miR-543>
+UCAGGUCCCUGUUCAGGCGCCA<miR-1274a>
+GACGGAGGUUUGCUAAGGAA<miR-184>
+UACCCGUAUAAGUUUCUGCUGAG<miR-55>
+UCGUCCUCCCCUUCUUCACCG<miR-UL148D>
+UGACUAGAUCCACACUCAUUAA<miR-279,miR-279a>
+GAUUUCAGUGGAGUGAAGUUC<miR-205*>
+UGAGCACCACACAGGCCGGGCGC<miR-3663-3p>
+UGAUAUGUCUGAUAUUCUUGGGUU<miR-50>
+CAACAAAUCACAGUCUGCCAU<miR-7*>
+GGUCCAGAGGGGAGAUAGG<miR-198>
+AGCUGCGCUGCUCCUGGUAACUGC<miR-2139>
+CUAGCACCAUCUGAAAUCGGUU<miR-29a>
+UGCCAUUUUUAUCAGUCACUGUG<miR-1985>
+AGAUGACAUGUGAAUGAUGAGGGG<miR1877>
+UCAGGCUCCUGGCUAGAUUCCAGG<miR-344a-5p>
+UGAGUAUUACUUCAGGUACUGGU<miR-12>
+UUUGAUUCCAGCUUUUGUCUC<miR773b>
+GCUGCAGAGCCGUGCGCGC<miR-1354*>
+CGGGACCUUGGACCUCGACACA<miR-2018*>
+CCGGACAUUGUGAGAACGGCUC<miR-3015b>
+UUGAAGUGUUUGGGGGAACUC<miR395g>
+AAGAUCAUUGUUAGGACGCCAUC<miR-1022>
+CCUGAGACCCUAGUUCCAC<miR-4329>
+UGGCAGUGUAUUGUUAGCUCGU<miR-449a>
+UUCUGAACUCUCUCCCUCAA<miR1446e,miR1446d,miR1446a,miR1446c,miR1446b>
+CCAGUUACCGCUUCCGCUACCGC<miR-935>
+ACAGAAAAGAUUGCUUCG<miR-4211-5p>
+UUAGCAGUGCCUCGACCGUCAG<miR-m59-1>
+UAGCCAGGGAUGAUUUGCCUG<miR169l>
+UCCGGGGAAUGGAUCCAGCGU<miR-2299-3p>
+CUGCUGCCCAAGUGCUUAUCG<miR-252*>
+UAGGUAAAUCAAAUUUCAGGCUG<miR-4050-5p>
+AGAAUCCUGAUGAUGCUGCAA<miR172i>
+UAUUGGUGCGGUUCAAUCAGA<miR171c*>
+UUCCCUUUGUCAUCCUAUGCCU<miR-204a,miR-211,miR-204b,miR-204>
+GUGUCUGUUUCCUGCCGGA<miR-632>
+UACCCAUUGCAUAUCGGAGCUG<miR-660>
+AUAUAAUACAACCUGCUAAGUG<miR-374b-5p,miR-374b,miR-374>
+ACACAUUACAGAUUGGGAUUA<miR-1889>
+UGUCAGUUUGUCAAAUACCCUA<miR-223>
+CCCGGGAAUCAAACAUAUUACUCU<miR-190*>
+UUUGGUAUUGGUCCCUGCACUU<miR2603>
+UCUCCCAAUCCUUGUACCAGUG<miR-150>
+GUAAGUGCACCAGAUUGGGAAU<miR-2494>
+AUCUUGCCCGCAAAGACCC<miR-3549>
+UGAUAUGACCGAGUGUUUGUUAGAAA<miR-3213*>
+AGAGUAACAUACACUAGUAACA<miR1139>
+UGAGACCUCUGGGUUCUGAGCU<miR-769-5p>
+ACUUGGGCCAAGGGAAUGCAAACU<miR-375*>
+AGGGCUUAGCUGCUUGUGAGCA<miR-27a*,miR-27a-5p>
+UAGGAGCUCAACAGAUGCCUGUU<miR-3139>
+ACUGUUGCUAACAUGCAACUC<miR-367*>
+AACAGCUGAGUGAUUUAAAGCA<miR-1781*>
+UUCCCUAGUCCCCCUAUUCCUA<miR482c>
+CCUAUUCUUGGUUACUUGCAC<miR-26a*>
+UUCGUAGAUAUUGUAGUUACUGG<miR-2764>
+AUAUGGGUUUACUAGUUGGU<miR-3115>
+UGGUGGGCACAGAAUCUGGACU<miR-541>
+UUGUGCGUGUGACAGCGGCUA<miR-210>
+CACGUGUUCUACUCCUCCAAC<miR164c*>
+AGUUUUCCCUUCAAUUCAG<miR-684>
+GAGUUCACUCGGCACGCAUGC<miR-H4-5p>
+UGACUAGAUCCACACUCAUCC<miR-279,miR-279a>
+UAGCACCAUGAGAUUCAGCUC<miR-998>
+UUUUAGAAUUCCUACGCUUUACC<miR-927>
+UGUAACAGCAACUCCAUGUGGA<miR-194>
+UCUAGAGGGAAGCACUUUCUGU<miR-520c>
+UUCAGUUUCCUCUAAUAUCUCA<miR2275c-3p,miR2275b-3p>
+UAAGGCACGCGGUGAAUGCUGA<miR-124b>
+UGCAUCAUGCGUAGCCUCCCCAA<miR-1421ac*>
+ACUGCAGUGGAGGCACUUCUAG<miR-17a*>
+AGCUACCCGCGUGGCCGGAGUGUUU<miR-M1-15>
+CUUGGCACCUAGUAAGUACUCA<miR-1271>
+UAGUACGGCUAGAACUCCACGG<miR-2941>
+CCCGGCAUGCUGCACUGUCCUG<miR-1801>
+CAACAAGUCACAGCCAGCCUCA<miR-7b*>
+GGUUUUCCAUGUGUAAGAGC<miR-4009a-5p>
+UUGUGCGUGCGACAGCGACUGA<miR-210>
+UUUGUUUUAGCCUGAGCUAUG<miR-355>
+UUACUUGCUUUAACAGUAUG<miR-4013b-5p>
+UCUUUGGUUAUCUAGCUGUAUGA<miR-9-2,miR-9a,miR-9-1,miR-9>
+AGGAUUGGUGUAAUAGGUAAAA<miR2089*>
+GACGGACGGUUAAACGUUGGAC<miR812e,miR812a,miR812d,miR812c,miR812b>
+UGGCAGUGUGAUUAGCUGGUU<miR-34>
+CAGGUGCCAGCUCCUCCCUUC<miR-1943*>
+UGGAAUGUAAAGAAGUAUGUGA<miR-1c>
+UCGGUCGGACCGAUCCAAUCGGAA<miR4389>
+CACACCUUAACACCAGUGCGCUGA<miR-1470>
+ACCGAUUUCAAAUGGUGCUA<miR-3556b>
+GGUAUAACCAAAGCCCGACUGU<miR-344b-2-3p>
+AUAAAGGAUCUUUACCAAAGCA<miR-3241>
+CAGUAGUCUGCACAUUGGUUA<miR-199a*>
+UGUAUGCCUGGUGUCCCCUUAGU<miR-BART17-3p>
+CUUGGCACUGGGAGAAUUCACAG<miR-263b>
+UACUGCAUCAGGAACUGAUUGG<miR-217>
+AGAGAAUAGGGCAUGGGUACU<miR-3507>
+UGGGGAGGGCGGUCAGCGCGCG<miR-rR1-4>
+UACCCUGUAGAACCGAAUGUGUGUG<miR-10d>
+UGAUGAAUCAACAGUAUAAAAACG<miR-1993*>
+ACAUACUUCUUUAUGUACCCAUA<miR-1-2*>
+UUUUUUAGCCCGCGGAAGUUGU<miR-2025>
+CCUACUGGAGUGCCUAGCAC<miR-1365*>
+CUCUCUGAUGGUGGGUGAGGAG<miR-1896>
+AAAUCUCAUCCUAAUCUGGUU<miR-259>
+UGGUGGGCCGCAGAACAUGUGC<miR-654-5p>
+UCAUCCUGGCCUUCUUGCGGUAGA<miR-3224>
+CGGAACAUUGUUGGAACGGG<miR-4018a-5p>
+GUUCCCUACAAGCACUUCACAA<miR395b*>
+UCAAUAGAUUGGACUAUAUAU<miR860>
+AGAGGGACAUUGAUGCGCUGC<miR1150.1>
+GGGCGAAUCCUCUAUUGGCAGG<miR399e*>
+UCAAUGAUUAAAGACCUAUU<miR-4042-5p>
+UAUUGCACUUGUCCCAGCCUGU<miR-92b>
+GGAAUGUUGUCUGGUUGGAGA<miR166g*>
+GUUCCACACUGACACUGCAGAAGU<miR-3692>
+GCAGCACCUGUUUCCUGCAACC<miR-K12-1*>
+UCUCACAUUUACAUAUUCACAG<miR-1003>
+CACUUCCCGUCCUUCCAUCCC<miR-H6-3p>
+UAAGGCACGCGGUGAAUGCCAA<miR-124>
+CCAAGGUCGAGGUGAUUGAA<miR-4051-3p>
+UGUAAGUUGACAUAGUCCCAGG<miR-1990a>
+AGAUGGUACUACGUGGGAAUG<miR-2837>
+GCAGCAGGGUGAAACUGACACA<miR-761>
+UGUCACGGACAGAACCCCACUC<miR1100>
+UGUAAACAUCCUCGACUGGAAGC<miR-30b-5p,miR-30a>
+CAGGGAGGUGAAUGUGAU<miR-1321>
+CCUCUAGGGAAGAGAAGGUUGG<miR-3059*>
+UCCUUCUAGCCCGAAGUGUCAG<miR-2252>
+UGAUCCCAUGUUGCUGGCGC<miR-K12-7>
+CGAGACGAAGAUAUGGGUGAC<miR774.1>
+UCCCUGUCCUCCAGGAGCUCACG<miR-339-5p>
+UGUUCAGACUGGUGUCCAUCA<miR-743b-5p>
+UUUCCUUGGGAAGGUGGUUUC<miR2055>
+UCAGGUACUAGGUGACUCUGA<miR-306>
+UUCAAGAACCAAGCGGACCUC<miR3459>
+UGCCUUCCUGUCUGUG<miR-4297>
+AGUAAUACCUUUCGAACACAUGA<miR-983>
+ACUCAAAAUGGGGGCGCUUUCC<miR-373,miR-373*>
+UGGAACUUAUGCGAACGGGC<miR-4001h-5p>
+AGAGCUCAGCACGCAGGGGUGGC<miR-2951>
+CACAGUCGAUGAUCAUAGGGUU<lin-4-3p>
+CUGGGAGGUGGAUGUUUACUU<miR-30b-3p>
+UGCCACAACAAAGCUAAUAAC<miR1025>
+CUGUGCGUAAAACAGCGACCUU<miR-210b>
+AUUCCAUCCUUCGACUAGCGACU<miR-M32*>
+CUGAUAAUUUUACGAUGAAUAG<miR2095-5p>
+UCACGGUCCGAGCACAUCCA<miR-US33-3p>
+GGAGUAUUGUUUCCGCUGCCUGG<miR-503*>
+UAGGCAGUGUAUUGCUAGCGGCUGU<miR-449c>
+GGAUUUUGUGUGUGGACCUCAG<miR-2500>
+UAGGUUGUUGUAUAUGUGG<miR-4101-3p>
+UUUGGCAAUGGUAGAACUCACACU<miR-182>
+UUCCCAAGGAGGUGUCAUUUAC<miR-513c>
+UGCAAACCUUACCUUCAAAGGA<miR-3385*>
+GCUCUGAGCUGCCCCUCCUCGUCC<miR-4339>
+UGUUGGCUCGGCUCACUCAGA<miR171d*,miR171e*>
+UUAGGGAGUAGAAGGGUGGGGAG<miR-3162>
+AGGCUACAACACAGGACC<miR-187*>
+UUUUGAGUAUGCCCGCUGUACAAUUCC<miR-3296*>
+UAGCACCAUUUGAAAUCAGUGUU<miR-29b>
+GCAAACUUCCUCGGGUCAUGG<miR-2568b>
+UCUCAAAAAUUGUUACAUUUCAG<miR-1009>
+UUACUUUGGCAGCGCUGUGCU<miR1034>
+UGACAGAAGAAAGAGAGCAC<miR156h>
+UCUUUGGUAUCCUAGCUG<miR-9c*>
+UGAGUAUUACAUCAGGUACUGGU<miR-12>
+UCAGCAGUUGUACCACUGAUGUG<miR-1992>
+AACCCGUAGUCAAGUCUACGGAG<miR-2274>
+CAAAAACCACAGUUUCUUUUGC<miR-548d-3p>
+UUCCCAGUAAUGUCCACUUACAAG<miR-2494>
+UAUUUCUGGAAGUUACAGUGGGC<miR-2530>
+CUUCAGGCUUUUCUCACACCUG<miR-1769*>
+UGAUGUCAUCACUCAGUACCG<miR-1419g*>
+UUUGGUACUUCGUCGAUUUGA<miR2597>
+ACCGUUUGAUGUACUACUUUAG<miR-968*>
+GCGUGCAAGGGGCCAAGCAUG<miR160a*>
+CUCUCCCCUACCACCUGCCUCU<miR-1894-5p>
+CGGGGAUCGGACUAGCCUUAGA<miR-BART6-3p>
+UGGGAAGUAAGGAAGCACGGAA<miR-1-as>
+GCAUGGAUCUCUCGCGGGGUGCGUAGGCGU<miR-H8>
+UUGGGGCCCAGCAGGUCCUGG<miR1145.1>
+UAUUGCACAUUACUAAGUUGC<miR-32>
+GCUAUUUCACUACACCAGGGU<miR-138*>
+GUGUCUGUUUCCUGUGGGA<miR-632>
+GGGCAAGUCACCCUGGGCUACC<miR1433>
+GUGCAUUGUAGUUGCAUUGCA<miR-33a,miR-33>
+ACAUGGUCUGUUACAAGGGA<miR-2035>
+AUACAUUCAUUUUGACAUAC<miR-4112-5p>
+UCAGGCUCCUGGCUAGAUU<miR-344a>
+UUCCGGGAAUGCGCUGUUGUUGG<miR-2522b>
+AUGAGGAUGGACUUAGCUUUCG<miR-2322*>
+UGCCAAAGGAGAAUUGCCCUG<miR399g,miR399a,miR399j,miR399h,miR399c,miR399b,miR399e,miR399f>
+ACGACAAGUAGGGUCCUUUU<miR-4073-5p>
+UUGUAGAGUCAUACACCUCU<miR1223d>
+CACCGAGCUCUUCUUUUUGGAGG<miR1079-5p>
+GAGCCAGUUGGACAGGAGC<miR-575>
+UGGCACAAUCUGCGUACGUAGA<miR-784>
+UUACGUAUACUGAAGGUAUACCG<miR-iab-4as,miR-iab-4as-5p>
+UCCAGUGCCCUCCUCUCC<miR-1825>
+UUUGGCACUAGCACAUUUUUGC<miR-96>
+CGCAGGUUUUUGCUUCGGUGAU<miR-35d*>
+UGCGCAAAAAGAAUAUUAAUCGA<miR-2202>
+AACGGCCGCAUAUUAUAAAUCA<miR-2699*>
+UCAAGCUGCCAGCAUGAUCUA<miR167>
+AAUCCCGGACGAGCCCCCA<miR-1937a>
+UAUUGACGCGGUUCAAUUCGA<miR171j*>
+GGGAGGAGUCCAGGAGGC<miR-3584-5p>
+AUACAUACACGCACACAUAAGA<miR-466p-3p,miR-466c-3p,miR-466b-3p>
+CUCUCACCACUGCCCUCCCACAG<miR-1229>
+CGCAUUUUCUCAGCAGCCAAG<miR3629a*>
+UGGAAUGCAGCAAUUAUCACCU<miR-1743>
+UGCCUAGGCUGAGACUGCAGUG<miR-3135>
+UCCCUGAGACCCUAACUUGUGA<miR-125,miR-125b-5p,miR-125b,miR-125*>
+AGCCGUUGUUGCAGUGAAGU<miR-4060-3p>
+UGGCAGUGCUUUGCUAGCUGG<miR-449c>
+UGAAUGCCAGGACAAGCUAAA<miR3457*>
+AAUUGGUUAGAGGUGGUCUCUG<miR-1332>
+UCACCAGCGGGCAUUGGCAUCA<miR-1656>
+UACCAUCAAUAUAAAUGUGGGAAA<miR441b,miR441a,miR441c>
+AAACCUGAACGAAAUUUUUGGC<miR-2285d>
+UCAUCCUCAUCAUCAUCGUCC<miR414>
+UGGGUGAGGAGGGCGAGG<miR-1412>
+GGGGAGACGGGCUCAAGGAUC<miR1039-3p>
+UAAACAAUGCUUGGAUCUUGG<miR-4203-3p>
+UGGUAUAUAUGUGUGUGG<miR-4194-3p>
+CAUGAUGAUGAGAAUUUGU<miR-4120-5p>
+AUUGUACUUCAUCAGGUGCUCU<miR-305>
+CCGUGUGUAUUUGUGCGAGGCGU<miR-2493>
+ACUGAUUUCUUUUGGUGUUCAG<miR-29a*,miR-29a-1*>
+UGAGAUCAUUCAAGAAGCCC<miR-1834>
+AGGUGGUCCGUGGCGCGUUCGC<miR-323-5p,miR-323*>
+GACCCCGUGCGGCUGGAAG<miR-128*>
+UUGGACUGAAGGGAGCUCCUU<miR319c,miR319d>
+CUGACUGUUGCUGUCCUCCAG<miR-943>
+CUGUGCGUGUGACAGCGGCUAA<miR-210>
+AGGGUCUAGCCUGCCUGCC<miR-4008b-3p>
+UUGUCCCAUUCUAGUUUAGCU<miR2863a>
+GAAAUCAAGCGUGGGUGAGACC<miR-551b*>
+GUUUUGUUUGGGUUUGUUUU<miR-1814c>
+CAAAUCCUUGCCCGGGUGCAUU<miR-3560>
+AAGCUCGGUCUGAGGCCCCUCAGU<miR-423-3p>
+CGUUUAGGUCCCUUAACUUUA<miR2655d,miR2655k,miR2655j,miR2655n,miR2655g,miR2655b,miR2655i,miR2655c,miR2655a,miR2655o,miR2655h,miR2655e,miR2655l,miR2655m,miR2655f>
+UUCACAGUGUUCCUAAUAGAUAGU<miR-2582a>
+AUAAGUGUGUGCAUGUAUAUGU<miR-467h>
+UGUCAUGGAAUUGCUCUCUUUGU<miR-281>
+AUUGGUUUGAAGGGAGCUCCA<miR159e>
+GCUCACACACACACACAGCCA<miR-2493*>
+UAAUAGCCGGACGACGGAGUCU<miR-M32>
+UGGCAGAUCAUAGGCUGACUUUG<miR-2212>
+AGGUUGCCUCAUAGUGAGCUUGCA<miR-453>
+GACUGGACAAGCUGAGGAA<miR-3654>
+GUGCAUGCUGUUGCAUGCAC<miR-33b>
+AAAAGAUCGAGGAUCCGAUAUUG<miR-2826>
+GAGCCAAGGAUGACUGGCCGU<miR169i>
+GAAAGCUCUACCCAAACUCAUCC<miR-1017>
+AGUGAUGAUGAACCCUCUGAGC<miR-2307>
+UUGAACCCCUGACCUCCU<miR-2183>
+UUUUGCGAUGUGUUCCUAAUAC<miR-450c-5p,miR-451a>
+UGCGAGUCACCCCCGGGUGUUG<miR-712*>
+UCUUGCUCAAAUGAGUGUUCCA<miR828b>
+UAAGCUUCUGGACUUUGCAUC<miR-2955>
+GGUGAGCAAAUAUUCAGGUGU<miR-87>
+UACUGGAAGUGUUUAGGAGUAA<miR-1823>
+UGCUGGAUCAGUGGUUCGAGUC<miR-1287>
+CAGCCCUUCUCCUAUCCACAA<miR946a,miR946b>
+AACAUUCAUUGUUGUCGGUGGGU<miR-181d>
+CUCCUUCACCCGGGCGGUACC<miR-712>
+GGCAGAGGAGGGCUGUUCUUCCC<miR-298>
+GGACUUCCCAUUUGAAGGUGGC<miR-617>
+AGAGCGGGAGUGCAGAUAAC<miR-4115-3p>
+AUAAGACGAGCAAAAAGCUCGU<miR-208>
+GUGGUCCGAUUAAGCGGG<miR-4109-3p>
+GGUCCAGAGGGGAAAUAGG<miR-198>
+AGAGUAUUGGCGCUGGGCAAAA<miR-2024e*>
+UUCGUCUCGUAACUGCCCUGAAG<miR-2040b>
+UUGCACAACACCAAUAUUCUGA<miR-2024c>
+CAGUGGUUUUACCCUAUGGUAG<miR-140,miR-140-5p>
+UUAACAAGUAUCAUGUAAAUUGAA<miR-982a>
+UGAAUGAUGCCUGGCUCGAGA<miR166f*>
+UUUUCCUCUGUUGAAUUCUUGC<miR4221>
+AAGGAAGUGGCUUGGGGAAAG<miR-2426>
+UUGUGGCUUUCUUGCAAGUUG<miR444d.3>
+AGUAGGACGUUUCCUCCCGCGUG<miR-2775b>
+UCUUUGGUUACCUAGCUGUAUGA<miR-9b>
+AUUGCACUUGUCCCGGCCUAU<miR-92a>
+GGAUAUCCAGACAGGGCAAA<miR-4071-3p>
+GUGUGAAGUGACGUAGGGAAG<miR-3207>
+CAGGCGUCUGUCUACGUGGCUU<miR-3186-5p>
+UCUCAUUCCAUACAUCGUCUG<miR1507a,miR1507b>
+ACACAGUGCUUCAUCCACUACU<miR-3681*>
+AAAAGUGCUUACAGUGCAGGUA<miR-106>
+GCAGAGCUGCAGAUGGGAUUC<miR-757>
+AACUCCUGCAUGACGCCGUUCCC<miR-3544>
+UUGCUUGGUGCUGGUCGGGAA<miR168>
+UGGGCUUGGGCAGUGAGGACUGG<miR-2330>
+GCCCCCUCCCUUGGUCGCCGG<miR-2328>
+UCUCGAAAGCGGCACAUGCCAUCC<miR-2273>
+CAUCACAGUCAGAGUUCUAGCU<miR-11>
+UCGGAGUGUCACAGAACUUUGC<miR-2957>
+GGGCAUCUUUCUAUUGGCAGG<miR399c*>
+CAAAAGUUGUUGGGUUUGGCUGGG<miR474b>
+AAACUGAAAGAACAGGAUUGCUG<miR-2352>
+AAGCCCUUACCCCAAAAAG<miR-129-1*>
+CGGUUGACCAUGGUGUGUACG<miR-1197*>
+UUACAGAGUCCAUUGAUUAAG<miR475d>
+UAUUCGGAAAUGUAGGGUGG<miR-4055-5p>
+AGGUUAUGCAGGCGAAGGAAUA<miR-2786>
+UACCCUGUAGAUCGAGCUGUGUGU<miR-57>
+CCUUAUCAUUCUCGCGCCCCG<miR-184*>
+AUAUACCUGUUCGGUCUCUUUA<miR-3144-3p>
+AAAUCUCAGCUGGCAACUGUGA<miR-216a>
+UGAUUGGAAAUUUCGUUGACU<miR779.2>
+CCUGUUCGUAUAAGUUCCAA<miR-4002-3p>
+ACUGGACUUGGAGUCAGAAGG<miR-378>
+AGGUGGCCGUACCUCAUGCAGA<miR-1421u*,miR-1421u>
+UCGGCAACAAGAAACUGUCUGA<miR-196a*>
+UGAAUAGAUGUGAUUUGG<miR-1399>
+CCCCUUUGUCAAUUACACUGC<miR-1398>
+GUUGCUUGGGGGUAUUACUA<miR-754b>
+CUCCAAGGCUGUUUCCUCUGA<miR-1771>
+UGAAAGACUGAUGGGUCCUGGG<miR-2229>
+GAUCUUCCAGGGCUAGAGCUG<miR-K12-2*>
+UGAAUUCUUAUGUGAGCUUUGC<miR-3044>
+UCCCUGAGGAGCCCUUUGAGCCUG<miR-351>
+UAGUAUGAAGGGUGGUUGGUACUA<miR-3366>
+UAAAUCUCACCUUUCUGAGAAG<miR-513a-1-3p>
+AGGCUACAACACAGGACCCGGG<miR-187*>
+CAUCUUACCGGACAGUGCUGGA<miR-200a,miR-200a*>
+UGUCUCUUGAUUACUUUCGUGAGU<miR-3260>
+AGGAGGACACAUGUGGUGCAGU<miR-1421ac>
+UGUUACUAUGGCAUCUGGUAA<miR3511-3p>
+GGAAUGUUGUCUGGCACGAGG<miR166e*>
+AUACGGCGCUGCACGGUUGGA<miR-rR1-2>
+UAUUGCUUGAGAAUACACGUAA<miR-137>
+UUCUGUUGGAGAGAAGAGACA<miR-1752>
+GCCCUAAGGUGAAUUUUUUGGG<miR-186*>
+UUCGAGGCUACAGUGAGAUGUG<miR-1304>
+AGUUACUGAAGAAGCUGAUGCUG<miR-2201*>
+CAAGGGAAGAUAUCUGUAUG<miR-2818>
+AGCUUCUUUACAGUGUUGCCU<miR-107*>
+ACCCUAUCAAUAUUGUCUCUGC<miR-454*>
+GGAGGCGCAGGCUCGGAAAGGCG<miR-3197>
+GGAAUGUUGUCUGGCUCGAGG<miR166e*,miR166d*,miR166a*,miR166c*>
+UCACAAGUUCAUCCAAGCACCA<miR3623*>
+UACAGUACUAUGAUAACUGAAG<miR-101b>
+GCAUUGUGUGACCUACUUAAAU<miR-1002*>
+GACCGAGGAUGAAAAUCA<miR-1370>
+UGUAAACAAUUCCUAGGCAAUGU<miR-384-5p>
+UAAGUGCUAUUUGUUGGCGUAG<miR-430i>
+UUUCCCUCUCCGUGCGCGCUCG<miR2103>
+AUGCGAUUUUACCAAAAUGCAA<miR-2027>
+UAUUGCACUUGUCCCGGCCUACU<miR-92a>
+UGAAACUGUGUGAGGUGGUUUU<miR-M1-6>
+UUUGUUCGUUUGGCUUAAGUUA<miR-375>
+ACUCAAACUGGGGGCUCUUUUG<miR-292-5p>
+GGAGAAAUUAUCCUUGGUGUGU<miR-539-5p,miR-539>
+GCGAGGACCCCUCGGGGUCUGAC<miR-611>
+UGGGAAGAGUCUGUUGAGUGGC<miR-M1-13*>
+CCAGAUCUAUCUUUCCAGCU<miR-750>
+UGUUAUUUCAUCGAUUUUGUUG<miR2657b,miR2657a>
+GGCAAGUUGUUCUUGGCUACA<miR169b*,miR169a*>
+GACUGAGCUCGUCCAUUCAUCU<miR-3267c>
+AAGUUCGUUCGGAUUUUUCC<miR-2284e>
+AAAAAAAAAAACUCCCCCCC<miR-2391>
+AAGGCCAUGGCUGUUUGCUGCU<miR-1730>
+UCCGAGGCUCCCCACCACACCCUGC<miR-1188*>
+UAUUAUGCACAUUUUCUAGUUCA<miR-60>
+UUGUGACCGUUAUAAUGGGCAUG<miR-2001>
+UAUUUCAGGCAGUAUACUGGUAA<miR-2007>
+UAGACCAUUUGUGAGAAGGGA<miR824>
+CCCAUAAAGUAGAAAGCACU<miR-142>
+UUCAAGUAAUCCAGGAUAGGUU<miR-26b>
+GUUCCUUCCAAACACUUCACCA<miR395l*>
+UGCCCUAAAUGCCCCUUCUGGC<miR-18b*>
+GCAAUGCAUCUGCAGUGCAAACA<miR-33*>
+AAUCAUUCACGGACAACACUUU<miR-382>
+UGAUGAUACAGGUGGAGGUAG<miR-3682>
+UUUUCCUUACCGUGUAGCUUAGA<miR-M11-5p>
+GUGUUGAAACAAUCUCUGUUG<miR-653>
+UGAAAGACAUGGGUAGUGAGAU<miR-71,miR-71c>
+AUGACCUAUGAUUUGACAGAC<miR-215>
+UAGGUUCUGUGAUACACUCCGACU<miR-152*>
+CGUCAACACUUGCUGGUUUUCU<miR-505-3p>
+GUUCAAGAAAGCUGUGGAAGA<miR396g*>
+AACACUGUCUGGUAAAGAUGG<miR-141>
+UUCGGAAAAAUUCUGGAAGACGUC<miR4400>
+UAGGUAAACCACGGAUUGCUUA<miR-1489>
+UGCUGAGAGAAGUAGCAGUUAC<miR-883a-5p>
+UGAAACUUGCAGGAACGGGC<miR-4000b-5p>
+AUGUAACCCAACGCAGCAUGAU<miR-1397*>
+CAUGCUAGGAUAGAAAGAAUGG<miR-3146>
+ACGGGUAUUCUUGGGUGGAUAAU<miR-137a*,miR-137*>
+CGGUCGCCGGUGGUCAAUGGU<miR2613>
+GAACUGCUGAAGGAGGGCUGA<miR-1796>
+CCUCGUAGCUUGAUCACGAUAU<miR-1329*>
+CUUCCGCCCGGCCGGGUGUCG<miR-718>
+CUUUUCCGCCUAGGUGUCUCUCU<miR-967*>
+AAAAGCAUUUUGAAUGCAGAUUU<miR-3906>
+UCUGGUGUUGAGAUAGUUGAC<miR869.2>
+UCCCAGUGGAGCUCUGCAAGGAC<miR-2130>
+UAAGGCACGCGGUGAAUGCCA<miR-124,miR-124c,miR-124a>
+UGACAGAAGAGAGAGAGCACA<miR156e,miR156a,miR156j,miR156,miR156b,miR156d,miR156k>
+UAUCGGAGAUAGGACUUGAUAC<miR-rL1-24-3p>
+GUAUUAGUUGUGCGACCAGGAGA<miR-230>
+CAUGUUUUGUGUAAUUGUGU<miR-4143-5p>
+GGAGGGAGGAUCUGCUGUUAG<miR-3103*>
+CAGGUUACAUGCGGUGCAGUAU<miR-1421a>
+AUCUCAUCAAUCUCCCAAUAC<miR3444b>
+AAUAUGAGUGAAAGUAUGCCAC<miR-2245>
+CAAGCUCGCCUCUCUGGGUCUG<miR-99*>
+UUAGUCAUGAAAGCGUUUUUUC<miR-1422h*>
+UCCAUUGUGUUCUUGAAACUCUCUA<miR-3405>
+CCAGCUUCCUUCCAGCCCUUG<miR-3099*>
+UAGGACAACCGGGACGGACAGG<miR-M17>
+AAAAUGCCAGUCAUUGACGGA<miR-357>
+UAAACAGUUAUCUAAAUGUGAGUCA<miR-3272>
+ACCAUCGGCCGUUGACUGUACC<miR-181a-2*>
+UGGUCGACCAGCUGGAAAGUAAU<miR-412-5p>
+GACACGGGCGACAGCUGCGGCCC<miR-602>
+UGUCGGAGCCGGAGGUUCCGGA<miR-2018>
+CUGAAGUGUUUGGAGGAACUU<miR395>
+AUAAAAUAAAGGUAGGCUCU<miR-2039>
+UGCAUUUGCACCUGCACCUU<miR530a>
+AGCUAAUGAAUCGUUUCA<miR-4212-3p>
+CAUACAUUGCCUCCUAGGCUUG<miR2091-3p>
+AAAAGCUGGGUUGAGAGG<miR-320d>
+UCGGGGAUCAUCAUGUCACGA<miR-542-5p>
+UACACACACACACACAAGUAAA<miR-669c*>
+AGCUACAUUGUCUGCUGGGUUUC<miR-221>
+UAUUGCACUGGUCCCGACUAAU<miR-92b>
+UUUUGCAGUAUGUUCCUGAAUA<miR-450b-5p>
+CUUGCUCUUACUGUGACAUC<miR-4071-5p>
+AUCCUUGGCCUUCCUAGGUGU<miR-3075*>
+AAAACGGAGCGGUCCAUUAGCGCG<miR2121a,miR2121b>
+GUGGAUAUUCCUUCUAUGUUU<miR-376c*>
+GAAGUUCUGUUAUACACUCAGG<miR-148b-5p>
+ACAGCAGGCACAGACAGGCAG<miR-214>
+AAUUGCACCAAUCCCGGCCUGC<miR-92b>
+AGGUUUAUGAUCGUAACAAU<miR-4191-5p>
+UAAAGUAAAUAGUCUGGAUUGAUGA<miR-987>
+GCUAGUCCUGACUCAGCCAGU<miR-554>
+GUGAGUGGCCAGGGUGGGGCUG<miR-3102*>
+AGAUGUAUGGAAUCUGUAUAUAUC<miR-3171>
+UAACUCAGUCAGACCACGCCA<miR-2688>
+AACCGUAUGCGAUCACAUUGAC<miR-M5*>
+GUGAGUGGGUCGCACGGAGCGU<miR-3642*>
+CAACAAAUCCCAGUCUGCCUGA<miR-7*>
+UUUAUUGAGCACCUCCUAUCAA<miR-325,miR-325-3p>
+UGUCACUCGGCUCGGCCCACUAC<miR-668>
+GUCAUCCAUGGAUUGUGAUUUU<miR-2d-5p>
+UUCACCACCUUCUCCACCCAGC<miR-197>
+ACUGGACUCAGGGUCAGAAGGC<miR-422a>
+UAUUGCACACCCACUGGCCUGA<miR-311>
+UGUGCCUUUUCGCGCUUGUUGCUA<miR3638*>
+CUCACGCAGUACAAGAAUUUC<miR-2545a*,miR-2545b>
+UUAGAAUAGGGGAGCUUAACUU<miR-964>
+GGUCGUGUUUGGUGUAUCAU<miR-92d-5p>
+ACAUUCCCCGCAAACAUGACAUG<miR-BART19-5p>
+UGAAAGACAUGGGUAGUGAGACG<miR-71>
+UGAGGUAGUGGUUGUAAUAGCU<let-7b>
+ACUGGCUAGGGAAAAUGAUUGGAU<miR-664*>
+AAACUCUACUUGUCCUUCUGAGU<miR-618>
+ACUGUCAUGGAGUUGCUCUCUU<miR-281>
+UAAUGCCCUGUACGAGAUUUGGU<miR-786>
+UCAGUAACAAAGAUUCAUCCU<miR-802>
+UACUGCCCUAAAUGCCCCUUCU<miR-18b*>
+UUAAAUGUGCGAACUGGUAAUG<miR-3003b-3p>
+UGCUAGUGAUGGUGAUUCUUCGAC<miR1865-5p>
+AGUCCAUGGUAUUCAGUUCUCU<miR-146c*,miR-146a>
+UGAUUGGUACGUCUGUGGGUAGA<miR-509a>
+UACAUACAUCUAUUGAGCCAUC<miR-784>
+AUCCCACCUCUGCCACCA<miR-1260>
+CAGGCGGGUGCUGAUACGAUCA<miR-2419*>
+GCUAGGGGCAGUGGUCAAGGA<miR1110>
+UUUCAUGUCGAUUUCAUUUCAGG<miR-288>
+AGGGAUAGGUAAAACAAUGACUGC<miR1510a-5p>
+AAAGUGCUUCCUUUUUGAGGG<miR-520e>
+UGAUGGAUGUAGGUGUAGAGA<miR-2527>
+UCACGAGCUGCAGGUUCCCUU<miR3460>
+UAUCACAAGAACAGAUCCAGCAC<miR-2222>
+UAAUACUGUCAGGUAACGAUGCC<miR-8a>
+UGAGGUAGUUUUUUGUACAGUU<let-7j>
+AUUGACUUCAGCGGGGUUUGG<miR-1803>
+UAUGAGAGUAUUAUAAGUCAC<miR400>
+GGCGGAGGUGUGAUAUGGUGU<miR-H4>
+GUGUCUGGGCGGACAGCUGC<miR-1231>
+UGGUUUUCAGAAGUGUAGCGUU<miR-1798>
+ACCAUCGAUCGUUGACUGUACA<miR-181a-1*>
+UCCCUGAGACCCUUAACCUGUG<miR-125a>
+UGGGCAGGAGACAGCAGGGC<miR-2449>
+CAUCCCCUGCCUCUCUUCUCC<miR-2962*>
+UGCAGGUGAUGGCGGGGCUG<miR-1636>
+CAGUGGUAGAGCAUAUGAC<miR-1957>
+UGUGCUUGCUCGUCCCGCCCGCA<miR-636>
+UACCUAACCAGUUCUCUGGUAUGCC<miR-3386>
+CCAAGUGCUCAGAUGCUUGUGGU<miR-105>
+CCGAAGCGUAACAGAGCGAU<miR-4098-3p>
+UGCAAUUUUUGGAACCAA<miR-1384>
+CAUCUUACUGGGCAGCAUUGGA<miR-200b,miR-200b*>
+GCUGUACCCUCUCUCUUCUUC<miR529*>
+UCCGGUCCGGGGUCCGAGCC<miR-1418*>
+AUAUUGUCCUGUCACAGCAGUA<miR-1000>
+UGUAGGGAUGGAAGCCAUGAA<miR-135a-2*>
+AGGCUGAGGCUGUGCUGGUUGU<miR-1609>
+GACAGUUUUAAAUGAUGUUACUUU<miR-723*>
+AAAGUGAUCGGGUUGCCGUCUG<miR-2019>
+UAGCACCAUAUGAAAUCAGUUU<miR-29a>
+UUGUUUGCAGAGAAUGCCCAA<miR1101-3p>
+UGAGCUAAAUGUGUGCUGGGA<miR-610>
+CGCUUCAUCAGGUGAAAAUGGA<miR-1392>
+AAUUAAAGAUUUCAUCUUACU<miR1886.3>
+GUGCGUGAUGAUGGAAAAUU<miR-1434>
+UGAAGACGAUUAUUAUUGAUUAUU<miR-2200>
+CCGUCAAAGCGGGCUGUCGUA<miR-2c>
+CAAAGGUAUUUGUGGUUUUUG<miR-548m>
+UUUGGCACUUAAGGAAUUGUCACU<miR-96a>
+UAUCAUCGAUCAUGUGAGCUGU<miR-392>
+UAAGUGCUUCCAUGUUUUAGUGU<miR-302d>
+CUGCUGUGAUGUGAGCUGAGCAUC<miR-1696>
+GGUGCUGGUUCCAAUUCAGGU<miR1107>
+AUCUCUACAGGUAAUUGUGAGA<miR-216c>
+UUCCACAGGCUUUCUUGAACUG<miR396c,miR396d,miR396e>
+UACGCGCAGACCACAGGAUGUC<miR-3939>
+UGGAAUGUAAGGAAGUGUGUGG<miR-206>
+UGUUCGUCCGUACACUGUUCA<miR416>
+AGUAUUACAUGGCCAAUCUCC<miR-496>
+GCUCACUGCUCUCUCUGUCAUC<miR156e*>
+UGAUAUGUCGCGAUUUACCG<miR-2234b>
+ACGGAUGAUUAAAGUUGGACACGG<miR812f>
+UUUGGUCCCCUUCAACCAGCUG<miR-133,miR-133a,miR-133c>
+GAGAGGUCACGUCUCAUGCCGU<miR-1421e*>
+GGGGAGCUGUAGAAGCGGUA<miR-920>
+AGGGGCGGGAGGGGUCGGGC<miR-1607>
+UGGAACCGGGCACGCAGGAG<miR1144a.2>
+UUGUCUUGAACAACUGCUUAU<miR-1992-5p>
+UGAUAUGUUUGAUAUUAGGUUG<miR-190b>
+AUGUGAUUAUGUGAUAAGUGU<miR2607>
+CACAAGAAUUGCGUUUGGACAA<miR-2964>
+CCAGUGGAGCUGCUGUUACUUC<miR-194-1*>
+UAGCACCAUAUGAAAUCAGUUAU<miR-29a>
+UCCGGCGAGAAAACUCAGUGGG<miR-2748>
+AAUCAGAACAUGACACAUGACAGU<miR1520k>
+UUCCGUGACUAUCACUUCCAUAAU<miR-3364>
+UCUGCCCCCUCCGCUGCUGCCA<miR-1913>
+ACUGCAUACCAUGUGAUCUCGCU<miR-1421ak*>
+CCUCUUCUCUGGAGCCAGGCUGG<miR-2988>
+GAACAUCCUGCAUAGUGCUGCC<miR-448-5p>
+CAACCCUAGGAGGGGGUGCCAUUC<miR-652*>
+AGCGGGAAGGAGUGGCCGGU<miR-4183-5p>
+UAGCACCAUUUGAAAUCAGUGU<miR-29b>
+AGAGCAGGGGCUGUGGGCUGCA<miR-2442>
+CCUUCUCAUCGAUGGUCUAGA<miR824*>
+UGAAGUGUUUGGGGGAACUC<miR395b>
+UUUAGGGCUAAUUCAGCAUGAACA<miR1870-3p>
+CCAGGCUCUGCAGUGGGAACU<miR-3155>
+UGAGAAGUUAGCCAACCAUCCGG<miR-2057>
+AUAAUACGUUUCGAACUAAUGA<miR-983>
+AGUGGGAGCGUGGGGUAAGAAG<miR482a*>
+UUCAGGUAAUUCAGGUG<miR-1297>
+AUAGGACUGUCUUAGAAUGGUGUA<miR4378a>
+CUCAAAGCAGAGAACUCUCGGU<miR-732>
+UAGGUAGUUUCCUGUUGUUGGG<miR-196b,miR-196b-5p>
+UGAGAUCAUUUUGAAAGCUGA<bantam*>
+AGGCGGAGACUUGGGCAAUUGC<miR-25*>
+AUCAACAGACAUUAAUUGGG<miR-421*>
+ACUGUAGUAUGGGCACUUCCAG<miR-20b*>
+UGCAGCAUGAUGUAGUGGUGU<miR-2013>
+UAGAACAUGAUACAUGACAGUCA<miR1520a>
+UGAGAACAAUAGGCAUGGGAGGUA<miR1869>
+ACCUGUGAAGUUCAGUUCUUU<miR-146a*>
+UGUAAUGGCACUGGAAGAAUUCAC<miR-263>
+GUGAGCAAAGUUUCAGGCGUGU<miR-87b>
+UGCCCAUGAUGACUGCUGACC<miR-2314>
+CGCAGACAAUGCCUACUGGCCUA<miR-3166>
+UGCACUUGAAUGGAGUUCUGGG<miR-1747>
+CUCUCCCUCAAGGGCUUCUA<miR477e,miR477a,miR477b>
+UAAAUUAGUGUAUAAACAUCCGAU<miR445g,miR445c,miR445f,miR445a,miR445h,miR445e,miR445i,miR445d,miR445b>
+UGAAGCUGCCAGCAUGAUCUA<miR167d,miR167b,miR167i,miR167c,miR167e,miR167,miR167a>
+AAGCCCUUACCCCAAAAAGUAU<miR-129-1*,miR-129-1-3p,miR-129*,miR-129a-3p,miR-129-3p>
+AAAGAGGUCUAUUUUUGCACACAG<miR-2584>
+ACUCUUUCCCUGUUGCACUAC<miR-130b*>
+UGUUGGAUGAUGUCAAUAAGU<miR3631b*>
+GUCAGGCCAGGAAGGGAUGUGAGG<miR-1672>
+UUAGGACAAAGUGCGAACGCUU<miR-H11>
+AAAACGGUGAGAUUUUGUUUU<miR-553>
+UUUAAGAAAACACCAUGGAGAU<miR-3658>
+AGAUUGAGACUUGUAUGGCUU<miR2610b,miR2610a>
+UCAAAUGCAAUUUUUAUA<miR-4188-5p>
+GUCAUUUUUGUGAUGUUGCAGCU<miR-153*>
+GCACUGUAGAUGGAGGGGCUGC<miR-1562>
+UGGCCAAAAAGCAGGCAGAGA<miR-3926>
+UAACUGAAAAUUCUUAAAGUAU<miR1512>
+UAGUACUGUGCAUAUCAUCU<miR-1278>
+CGGUGCUGGUGGAGCAGUGAGCACG<miR-667*>
+CAGCUGCCUAGCGAAGGGCAACG<miR-745>
+UGAGGUAGUAUGUAAUAUUGUA<miR-84>
+AAGUUGGAAAUUGAUUGACU<miR-4077a-5p>
+CUUUCAGUCAGAUGUUUGCUAC<miR-30d*>
+UCUCCCUUCAUGUGCCCAGA<miR-343>
+UCCAAAGGGAUCGCAUUGAUC<miR393a,miR393,miR393b,miR393d,miR393c>
+ACGGACACCGAACACGACACGGAC<miR4403>
+UAUGCAAGGGCAAGCUCUCUUC<miR-300,miR-300-3p>
+AAGCAGCAGUAUGCAAUGGUG<miR-2067>
+GGGUGCGGGGGUGGGCGG<miR-H10>
+GCCAGAAUGGACAUGGGCAGCAA<miR-1794>
+GUAAGAAUAAUGAUCCAUUAGA<miR-3020>
+UUCUGAGACCUGGGAAAAGCAU<miR-J1-5p>
+UUCAAGUAAUCCAGGAUAGGC<miR-26a,miR-26>
+UGGAGGAGAAGGAAGGUGAUG<miR-765>
+GGAAGCUGCCAGCAUGAUCCU<miR167>
+UUGUAGUAUCUUCCUUGAUACCGGA<miR-3229>
+UCCCAGUAAUGUCCACUUACAAG<miR-2494*>
+UGAAGUGUGUGAAACUGCAGCGG<miR-2475>
+UUGAUAAGACUGUCAUUGAUGA<miR-1500>
+UGUUGUAGUAGUUUAGCCCUGC<miR1162>
+UCUCGAAUAGCGUUGUGACUGA<miR-986>
+CGGGUGCCACGCUGUGCUCUCU<miR-317*>
+AACAACCGGUAACCCUGUCCG<miR-4064-3p>
+GGGGGGCAGGAGGGGCUCA<miR-328a*>
+GCCGCUUGGGUCUUGCCUGGGG<miR-2534>
+ACUGAAUGUCAAGCAUACUCUCA<miR-190b*>
+AGGUCGUCGACGUUGGUGCU<miR2926>
+UCGGACAACACCGACCCCCAGC<miR1149.1>
+UCCUCUUCUCCCUCCUCCCAG<miR-877*>
+UACUGCAUCAGGAACUGACUGG<miR-217>
+AGCAGCAUUGUACAGGGCUUU<miR-107b>
+UAUUGCAGACUUCUCAGACUACA<miR-2553*>
+AACUGAUUGCAAGCCUGUUUCCAG<miR-2547>
+AAGCCUGCCCGGCUCCUCGGG<miR-596>
+UUUGAGUGUGUUUGUUAUGAA<miR3447>
+UUUGGCAAUGGUAGAACUCACACUG<miR-182>
+CUGUAAUUCCACAUUGCUUUCCAG<miR-1019>
+AAGCUUGAAUUCAGAAAUGUCGA<miR-3023>
+GAAGUGUGCCAUGGGGUGUCU<miR-595>
+GCCGUUGUAAACAUGUUUCG<miR-4000c-3p>
+UAAGCUCGUGAACAACAGGCAGGA<miR-231>
+UGAUCAAGUGGAAACUCAGCAAA<miR897>
+GUGAUGUCGAACUCUUGUAG<miR-260>
+UUAUUGCUUAAGAAUACGCGUAG<miR-137,miR-137a>
+CAGGCCAUACUGUGCUGCCUCA<miR-15a*>
+GGCAAGAUGCUGGCAAGCU<miR-31b>
+GAUUAAUUUCCUUUUACGCUUA<miR-2202*>
+UAGCACCAUUUGAAAUCGGUUA<miR-29c,miR-29a>
+UGCCAACGGCUCGAGGAAUGUCCU<miR-2718>
+ACUUUCCAUCCCUUGCACUGU<miR-1545>
+GUCCCUGUUCAGGCGCCA<miR-1274a>
+AAAUGCUUGAGUCAUGUUGUU<miR2592s>
+UCUGGGCAACAAAGUGAGACCU<miR-1285,miR-1285b>
+UGUGCCAUCCCACACAUCCCGA<miR2867>
+UUGUUUAGGUCCCUUAGUUUCU<miR840*>
+GGCAAGUUGUCCUUGGCUACA<miR169r*,miR169a*>
+UCACCGGGUGAACACUUGCAGU<miR-37>
+CGGACAACGAUGGCAAUGCU<miR-4037-3p>
+UGGUUUAUCUUAUCUGUCGAGGC<miR-2940>
+UAUUGCAGCGCUGGGUGCAU<miR-1811>
+UAGUACCGGUUCGUGGCACGAACC<miR1117>
+AGGGGUGCUAUCUGUGAUUGA<miR-342-5p>
+UGACUAGAUAACACAUUCGUCU<miR-996>
+GAAAGUGCUUUCUGUUUUGGGCG<miR-427>
+UGCCCACCCUUUACCCCGCUC<miR-702>
+UGCCAAAGGAGAGUUGGCCUU<miR399c>
+GAUAUUGGCGCGGUUCAAUC<miR171b*>
+UCCCACGUUGUGGCCCAGCAG<miR-662>
+CGCUGUUGCCUUUGCAGUUGCU<miR-2491>
+UGAGUAUUGCAUCAAGAACCGA<miR-2157>
+AAUCACAGCCUGCUUUGGUCAU<miR-2d>
+GGCGGAGGGAAGCGGGUCCGUUGGU<miR-658>
+ACUCCUCGGCAGUGUUCGCAAACCU<miR-3482-5p>
+UGAGUGUGUGUGUGUGAGUGUGU<miR-574-5p>
+UUUGGAGAGAAAAUGGCGACAU<miR1312>
+CGGGUUUCGUUAGCAGCGGGCU<miR-981*>
+GUAUGUGGAAUUGAAGUUGAUAU<miR-2519>
+UGGACGGAGAACUGAUAAAGGA<miR-184b>
+UGAGUACCGCCAUGUCUGUUGGG<miR-1911>
+UGAUAGCUGCUGUGGCACGGA<miR-1637>
+GAUUUCAGUGGAGUGAAGCACA<miR-205*>
+UGCACUACUCCGGGGGUAGGAC<miR-M25-3p>
+CGCUAUCAGAUGUGCUCUUA<miR-4030-3p>
+AUUGUAGAACCUAAGAUUGGCC<miR-3674>
+GACCCUGUAGAACCGAGCUUGUG<miR-10c>
+GAAAACUGUAUCUGGAUUGAUG<miR-1422q*>
+ACAUGGCGGAGACGGUGGUGCC<miR-B10>
+CUGGACUGAGCCAUGCUACUGG<miR-1269>
+UCCUGUACUGAGCUGCCCCGAG<miR-486-5p,miR-486,miR-3107>
+ACAGUCUGCUGAGGUUGGAGC<miR-622>
+UAUCACAGUCAUGCUAAAGAGC<miR-13>
+UGUCAUGGAGUUGCUCUCUUAUU<miR-281>
+UGGCGGAUCCAUUUUGGGUUGUA<miR-56*>
+GUGAAGUAUUUGGCGGAACUC<miR395v>
+CAUCUUACUAGACAGUGCUGG<miR-200a*>
+UAAGUGCUUCCAUGUUUGAGU<miR-302d>
+UAGCCAAUGUCUUCUCUAUCAUG<miR-1817>
+UCACGCGGAGAGAUGGCUUUG<miR-3186-3p>
+AUGAGGUAGUAGGUUAUGCUGU<let-7c>
+AGGGAGGGUCUUUGUCACUGA<miR-802*>
+UAUCACAGUGGCUGUUCUUUUU<miR-6>
+UGCCAAAGGAGACUUGCCCAG<miR399h>
+UCGUCUUUCUGCAUAUGGUUGUU<miR-4040-5p>
+CUGAAGUGUUUGGGGGAACUCC<miR395b,miR395a>
+ACCAGGAGGCUGAGGUCCCU<miR-665>
+UCAGCAGUUGUUCCAUUGAC<miR-1992-3p>
+GUGGCUCCACUCACUUCCUUC<miR-647>
+CCUCGUGAUGAUGUGCGGCUU<miR-1354>
+UCUGGGAGGUUGUAGCAGUGGAA<miR-3192>
+UUUGUACUCCGAUGCCAUUC<miR-238>
+AUAAAGCUAGGUUACCGGAGUUA<miR-9a*>
+AAUUUUAUCAUCAAGCAAUAU<miR-754b*>
+UCCUGCAGAAGGUGCGGCUG<miR-1649>
+UGCCGAUUUCCCCCUCGGGCG<miR2096-5p>
+CCACCAGCUGGCGUUCCCUGG<miR-1838>
+AGAUCUUCUGGCUAUAGUUU<miR-4084-5p>
+UGAGAUGAAGAUUUGGAUGAC<miR774b>
+UUGGUUGCUGUAGAUUAAGUAG<miR-3066>
+CGGGUAACUUUGCAUCGCUGGCA<miR-2855>
+UGAGAUGAAGCACUGUAGCUCA<miR-143>
+UCCAACGUCUCGGGCCUCUACCUC<miR-3235>
+UGCUUUGAGGCAUUGUCCCUCA<miR-2694>
+GGCAUUUGGGAUUACAGCG<miR-4207-3p>
+AAGCCCUUACCUCAAAAGG<miR-129*>
+UUCAGAUCCUCAAAUACCAUAUG<miR-2517a*>
+GCACAUGAUGAGGAAGCACUGAAA<miR-1563>
+GCUCACUGCUCUUUCUGUCAGA<miR156a*>
+CUGUGACUUCUCCUUGUCAGA<miR-1574*>
+GUGGGGCCAGGCGGUGGUGG<miR-1227>
+ACGCUGAGGGGCCAUGAGACAGU<miR-I6>
+UUACACACAACUGAGGAUCAUA<miR-3941>
+GGGGCGCGGCCGGAUCG<miR-3178>
+CAACCCAAUGUCACGGACUG<miR-2230>
+ACCUUCCUCUCCAUGGGUCUUU<miR-3667-3p>
+AAACUUUCACCAUACAAAAUA<miR857*>
+CCUGCAUUGUACACACUGUGU<miR-460a,miR-460>
+AUUUGAUUGCUGUGAUCUGGUUU<miR-2050>
+UUCUCACUACCUUGUCUUUCAU<miR-71*>
+UCACUCCUCCCCUCCCGUCUU<miR-483,miR-483*>
+UCACCGGGAGUAAAACUGGUAU<miR-38>
+GUCAAUUCGUUUAAGCUCAA<miR-4001h-3p>
+UUAUUGCUUGAGAAUACACGUA<miR-137>
+UGGGCUAGGAAAAAUGAUUGGA<miR-664>
+CGCAGGGGCCGGGUGCUCACCG<miR-1909>
+CCCCUACAAGAGAUAUCAAUC<miR1085-5p>
+CCUCAGUCAGCCUUGUGGAUGU<miR-3431>
+CACUAGAUUGUGAGCUGCUGGA<miR-28*>
+AGAGGAUACCCUUUGUAUGUU<miR-1185>
+CACAGUGGCAUCUGGGAUUA<miR-216*>
+AAACGAACAAAAAACUGAUGG<miR837-3p>
+GAAUCUUACUGUAUGGCAG<miR-4180-3p>
+UUAAUGUGUUGUGUUUGUGAG<miR2108b>
+UAGGCUAGAGAGAGGUUGGGGA<miR-3099>
+UACCCGUAUUCUCAUAUCUGAGC<miR-54a*>
+CAGAUUCGAUUCUAGGGGAAUA<miR-10b*>
+UAUUGCACUUGUCCCGGCCUAA<miR-92a>
+UUAGAUGACCAUCAACAAACA<miR827a,miR827c,miR827,miR827b>
+CCCAAAGUGUCGGCGCAUAU<miR-4031-5p>
+AUUCUAAGUGCCUUGGCC<miR-4263>
+AAUGACACGUUUUCUCCCGGAUCG<miR-731>
+UCAGCACCAGGAUAUUGUUGGAG<miR-3065-3p>
+AAAAUGGUUCCCUUUAGAGUGU<miR-518e,miR-522>
+UGAAAUCUUUGAUUAGGUCUGG<miR-1890>
+AUCAUAGAGGAACAUCCACUU<miR-376b-3p,miR-376b>
+UGCGGGAAGCAUUUGCACAUG<miR822>
+AACAGGUGACUGGUUAGACAA<miR-552>
+ACUGUCUAACAACCAUCAAAUU<miR-315*>
+UGUCUUGUGUGUGCAUGUUCAU<miR-669e>
+UUGGCCACAAUGGGUUAGAAC<miR-588>
+AAAGUGCAUCAUUUUAGAGGAU<miR-519c>
+UGCCCUCAAAAGACGGUAUUAG<miR-2043b>
+CUAUACAGUCUACUGUCUUUC<let-7f-2*>
+UAUUGCACAUGACUAAGUUGCAU<miR-32>
+UGAAGCUCGGACAUUUGGUAAG<miR-2541>
+AUGGUCCGUGGUACGGUGUCCU<miR-M23>
+UCACAGCCAAAUUUGAUGUCC<miR-2d-3p>
+AAGCUGUAAGAGGACUGCCUAA<miR-2213>
+UGAGAUCAUUGUGAAAGCUAAUU<bantam>
+CUCCCACCCGGUAGUGGUGCU<miR-1391>
+AGCUCAAUUCAAUUGCACUG<miR-4220-3p>
+GGAAACCUCUGGGUUCUGAGCU<miR-769b>
+UAGGUUCCCUUGUUUCCAAAU<miR1095b,miR1095a>
+UGGGUCUUUGCGGGCGAGAUGA<miR-193b*,miR-193a-5p,miR-193a>
+UCACCGGGUGUACAUCAGCUAA<miR-40>
+UUCAUUUGGUAUAAACCGCGAUU<miR-579>
+AGAAAACCUUAUCUGGAUUUGU<miR-1422k-3p>
+UCGUGUCUUGUGUUGCAGCCGG<miR-187>
+GCCUUCUCUUCCCGGUUCUUCC<miR-320*>
+UGGAACAUGAUCGUAAGGGC<miR-4006e-5p>
+GAUUCAUGUGCAUGCAUUUACA<miR-2049*>
+CCCGGGUCCCAGUCAUCAAACGU<miR-2050*>
+CCCCUGGGCCGGCCUUGG<miR-4292>
+AGCGCCGCCGGCCGCACC<miR-2886>
+UCGGGUCAGCUACGACAUGAGCG<miR-2040a*>
+GACUCACUCACAGGAUUGUGCA<miR-3680>
+CCAUUUUCCGCGAUUGCCUUGAUUU<miR-124-5p>
+UCUAACUCGUCGGUAGUCA<miR-63*>
+GUGCCAGCUGCAGUGGGGGAG<miR-1202>
+UUUGGCAAUUGAUAGAAUUCACACU<miR-182>
+UGGCCUUGCGGGGAUUACUCAGCAA<miR-3289>
+GUUGUGUUGUUUUUUUUUGU<miR-2361>
+UGCAGCUGUUAAGGAUGGUGGACU<miR-1968>
+UACAGUACUGUGAUAGCUGAA<miR-101b>
+ACCUUAAUGUCACCAUGAUGA<miR-2038>
+GUAAGCAAGAGAUCGAUCCAUU<miR-2572*>
+GGGCUGGGCUGGGCUGGGCA<miR-1587>
+CAGCCAAGGAUGACUUGCCGA<miR169c,miR169f,miR169b,miR169g,miR169a>
+AAGACGGUACUUACCUCAGUAACA<miR4368a>
+UCUCUGCUUACAGUGUCUGGGG<miR-1689*>
+CAAUCCAUACUAGUCUUUCUAU<miR-1422c*>
+GAUAUCAGCUCAGUAGGCACCG<miR-3074-1-3p,miR-3074>
+UGGGCCAUCGUAUUACUAUCAG<miR1153.1>
+CAGUCAUGCGUUUUUUUUGGG<miR-3282>
+AUUUCACCGGUUCUGAGAGCA<miR-1417*>
+ACAUGUACCGUCGCUCUGGG<miR-4031-3p>
+CUGUACAGGCCACUGCCUUG<let-7g*>
+UGCGUGGAGCAUGAUCUCCCUA<miR-1421e>
+UUUGGAUUGAAGGGAGCUCUU<miR159b>
+UAUGCUGUUAAUUAGCGAUUGGUU<miR-2181>
+UUCUCAAGAGGGAGGCAAUCAU<miR-514b-5p>
+CCCCUCAGGCCACCAGAGCCCG<miR-760-5p>
+CUGACUCCCUGCUUCUCCGCAG<miR-3077>
+AAUGACACCAAAGCGAAACCGC<miR-2258>
+UGCCAAAGGAGAUUUGCCCAG<miR399a,miR399g,miR399e,miR399f>
+GAUCAUGCUGUGGCAGCCUCACU<miR167c*>
+UUGUUUUGCAUUGUAUAGGUA<miR2864.2>
+GAACGGCUUCAUACAGGAGCU<miR-337-5p>
+UUGCCGAUUCCACCCAUUCCUA<miR2118,miR2218>
+AUCUCAGGUUCGUCAGCCCAUG<miR-1388>
+UGUAGUGAUAAGGAGACUGUCU<miR-1776>
+CAGCAAGAUGGAACGUGAAUA<miR-2820>
+AGAAUCUUGAUGAUGAUUAAA<miR1426>
+UGAUCUAGCCAAAGCCUGACCGU<miR-344a-3p>
+UAGUGGAUGAUGCACUCUGUGC<miR-3681>
+GGAGGCAGAGGCAGGAGGA<miR-709>
+UAUGACACUGAAGCGUAACCGAA<miR-65>
+GCAGGAACUUGUGAGUCUCCU<miR-873>
+UUCAGCAGGAACAGCU<miR-4291>
+UCCCACAGGCCCAGCUCAUAGC<miR-3057-3p>
+GCAGCAGAGAAUGGGACUACGUC<miR-922>
+GCGAAUAUAACACGGUCGAUCU<miR-3578>
+UGACUAGAACCUUGACUCUGCUC<miR-61>
+UGGACCAGGGCUCUUCCUGCUGGCU<miR-1625>
+CUCCUAUGAGAUGCCUUUCCUC<miR-337-3p>
+UGCCUGGCUCCCUGAAUGCCAUC<miR160a,miR160b>
+ACAAAGUGCUUCCCUUUAGAGU<miR-520h>
+GGCAUGUCUUCCUUGGCUACU<miR169f*>
+AAUUGUGGUGGGUUGACAGUC<miR2664>
+UAAUACUGCCGGGUAAUGAUG<miR-200c>
+AGUGCCGCAGAGUUUGUAGUGU<miR-293>
+CAAGGAACGGAAAUGAGCCG<miR-4067-5p>
+CCUCUGGGCCCUUCCUCCAG<miR-326>
+UCACCGGGUGUCAAUCAGCUAG<miR-40>
+CAUGGGUAUGAUACGACCUGGGUU<miR-729>
+GAUGUUAUUGCAAGUUUUAA<miR-4000i-3p>
+CAGGCCUGCCCAUCUAGGACAC<miR-2306>
+GGCAAGAAUUAGAAGCAGUUUUGGU<miR-268>
+UGCAUUUACAACGUGUCUUUAGU<miR-124b*>
+UCAGUAAAUGUUUAUUAGAUGA<miR-545*>
+CGGGCGCGCCGGAAUCCGUGG<miR914>
+UGCCUGUCUACACUUGCUGU<miR-214*>
+CUAGAUGAGGCAAGAGUGAG<miR-4186-5p>
+UCAGCCGCUGUCACACGCACAG<miR-3574>
+UUCGAGGCCUAUUAAACCUCUG<miR402>
+ACAAUUGCACUCGUCUGUACCG<miR-4037-5p>
+UAUACCUCAGUUUUAUCAGGUG<miR-875,miR-875-5p>
+UGCGUUGGUUUAGCUCAGUGGUU<miR-733>
+GUCUCCAGGUGUGAACAUCGGU<miR-1403>
+CCUAGACACCUCCAGUUC<miR-4305>
+UCAUAAACACGCCAUAUUUCC<miR2077>
+UGCUGUUUGCAGGGCCGCCUCGGA<miR-1464>
+ACCUACUUCUUUACAUCUUC<miR-1-5p>
+CGGAGCGCGGCCCUGCGCUG<miR-1765>
+UCCCUCGAAGGCUUCCAAUAUA<miR477c>
+UUUAUUGCUUAAAAUGAAAU<miR1522>
+UUGAAAGGCUGUUUCUUGGUC<miR-488>
+UAGAGUGUAUACUGUGAGAGGCCU<miR4379>
+GUGACAUAUUUUACUACAAC<miR816>
+UAAAGUAAAUAGUCUGGAUUGAUG<miR-987>
+AAAAGUACUUGCGGAUUUUGCU<miR-548k>
+CUCUUCAAUCUCAGGACUCGC<miR-676>
+UUGAAGAACUGCAGGUGGUGGUC<miR-1497b>
+AAUUUGAAGCAUGAUGUCAAG<miR1217-3p>
+UAAGUGCUUCCAUGUUUUGG<miR-302b>
+CAUCAAAGUGGAGGCCCUCUCU<miR-291a-5p>
+UGUUCUGCAGGUGCCAGUCU<miR-1573>
+UGGGCAGCCUCUCAGUGAGCUCU<miR-1453>
+GAUAUCGCGCCCACCUUUAUU<miR-M1-7-3p>
+AUUGUGUCAGCCUGUCGUUCU<miR-4181-5p>
+CCACCGGGGGAUGAAUGUCA<miR-181d*>
+CUUUUCACUUUCGAACGGGUG<miR2679b,miR2679c,miR2679a>
+GGUGCUCACUUGUCCUCCU<miR-764-5p,miR-764>
+UGUAGCUCAGUUGGUAGAGU<miR-1692>
+GGAAUCUUGAUGAUGCUGCAGCAG<miR172d,miR172e>
+AUGGGAUAAAUGUGAGCUCA<miR1523>
+UAUCACAGCCACCUUUGAUGAGC<miR-2b>
+UUGGGGCAGUGGCUGGAUGGGA<miR-3562>
+AGGGGGCGAGACUCAAGCACUGGC<miR-2327>
+GCAAAGCACAGGGCCUGCAGAGA<miR-330*>
+UCGAAAUCUCUACGAGAUAACA<miR-M10-3p>
+UCAAAUUUUUGCCGGAAAA<miR-4174-3p>
+AAAAUGAAAUGAGCCCAGCCCA<miR-3646>
+UACCCGAUGUCCAGUGGUACCUU<miR-2262>
+AGAAGAGAGAGAGUACAGCCC<miR529f,miR529e>
+UGAGACAGUGUGUCCUCCCUUG<miR-1994a>
+AUAUGCUGGAUCUACUUGAAG<miR862-3p>
+CGACAUGGACGUGCAGGGGGAU<miR-US4>
+CAGGUAGAUAUUUGAUAGGCAU<miR-3927>
+UGGAUGUUCUCGGACGUUCAAAGC<miR-238*>
+UGUCUACUACUGGAGACACUGG<miR-934>
+AGUUUUGCAGGUUUGCAUCCAG<miR-19b-1*>
+UAAGUGAAUACUCUGUGUUGA<miR-785>
+UCGUUUUGGCGAUCGCAAAAUG<miR-274*>
+UCGUGCUGGAGCUGUUCUGG<miR-1754>
+UCUACAGUGCAUGUGUCUCCAG<miR-139>
+GCUGUGACGAUGUUGCACUACU<miR-301b-5p>
+UUUGCGACGCUGUCUUCGUGAUCAA<miR-2843-1*>
+CAACACUCCCUCGGACGCAGCA<miR-M30>
+UGAAAGACGAUGGUAGUGAGA<miR-71>
+UGUAAACAUUCCCGACUGGAAG<miR-30a>
+AUCCAAAGGGAUCGCAUUGAUC<miR393>
+CUCCAGAGCUGAGCAGAACUG<miR-2464-3p>
+UGAAACUUGCGUGGAACGGG<miR-4000c-5p>
+UAUGCCACGGCGGAUAGGAGCA<miR-2543b>
+UGAAAUCUUUGAUUAGGUCU<miR-1890>
+CAGCCAAUGCCACGACUGUCAUG<miR-1817>
+UGUAAACAUCCUCCCCUCCGCU<miR-30f>
+CUAGCAGCAAAAAGAACUUCAGA<miR-1551>
+GACGUGACAGACGGAAUAUCACAU<miR4371c>
+GCACUGAGCUAGCUCUCCCUCC<miR-1947*>
+CUGUACAGCCUCCUAGCUUUCC<let-7a-2*>
+CAUAAAGUAGAAAGCACUACUA<miR-142b>
+AUCACAAUACAAUAAAUCUGGA<miR443>
+GCAGCACCAUUAAGAUUCACA<miR172b*>
+UUGGCCUGCGAGAAGUGCUU<miR3456*>
+AAGUGCCGCCAUUUUUUGAGUGU<miR-371-3p>
+CUUGGUUCAGGGAGGGUCCCCA<miR-659>
+AAGACGGGAGAAGAGAAGGGAG<miR-483,miR-483*>
+UAAGACAUUAUCUGAAGAUUUC<miR-3056>
+AGAUCGACCGUGUCAUAUUCGC<miR-369-5p>
+GUAAGACGAACAAAAAGUUUU<miR-736>
+ACCAAGGUGUGUUAGUGAUGAC<miR-2011>
+CUAAGUAGUACUGCCGCAGGGAG<miR-252b>
+CUCACCUCUCUGUGCCUUCCAG<miR-1241>
+AAUGGUAAGAGAUUGAAGUGACU<miR-2270>
+AAAGACAUAGGAUAGAGUCACCUC<miR-641>
+UCACAGUGGUUAUAUACUGC<miR-3598-5p>
+GGCAAUCCCAUGUCAAA<miR848*>
+CUAUACGACCUGCUGCCUUUCU<let-7d*>
+GUUUGUGACCGACACUAACGGGUAGU<miR-274>
+UGUCUAGUCUCUCCACGGCCCG<miR1042-3p>
+AUAUACAUACACACACCUAUAC<miR-467c*>
+AGGUGCAUUGUAGUCGCAUUG<miR-33>
+CGUCUCCGGCGCCGGGUCCUGGC<miR-B6*>
+CAACUGUUUCAACUCCAUACAA<miR-2807b>
+UAGUAGGUUGUGUUGUUUAGU<miR-2354>
+UCACUCUGUAGACCAGGCUGG<miR-3470b>
+CAGCUGCAUACAAAAUUGGGC<miR-2807d>
+AGGAAGCCCUGGAGGGGCUGGAG<miR-671-5p,miR-671>
+UAUCACAGCCAGCUUUGAUAAG<miR-2c>
+CAUGUAUGGUUAGUGUUAUCAU<miR-64b*>
+ACGGGUUAGGCUCUUGGGAGC<miR-125-2*>
+UUUCCACAGCCUCUACACAUGU<miR-2070>
+GGGCAAAUACUCCAUUGGCAGA<miR399g*,miR399i*>
+CGGCCGUUCAUUGGGUCAUCUAGC<miR-980*>
+UGGCACGGCGUGAUGCUGAGUCAG<miR1119>
+CUCCUGGGGCCCGCACUCUC<miR-1343*>
+UUUCAUUCGAAAUUGUUACCGC<miR4222>
+UAUGUUGAUCCGUAUGAGUCGUAC<miR4410>
+AAUCAUCAAUUUGGUCUGUUAUA<miR-2c-5p>
+UUCUUGCACUCCUCCAUCUCU<miR2083-5p>
+UCAAGCUCGGGUUUAUCGGUGU<miR-1473>
+UGUGUGGAACCGUCGUCGAUGGA<miR-2761>
+CUAUACAACCUGCUGCCUUUCU<let-7d*>
+CUCUAGAGGGAAGCACUUUCU<miR-526a>
+CAAAGAGGAAGGUCCCAUUAC<miR-583>
+AUAUGCCCCAAUGUAUAAGCU<miR-1734>
+UAACUUACUACUGCCGCUUUAC<miR-rL1-32-5p>
+UUGUGCUUGAUCUAACCAUGUG<miR-218a,miR-218>
+AGAAUCUUGAUGAUGCUGCAG<miR172d,miR172c>
+GCCGUGGUCGUGCAGGGC<miR-1382>
+AGACACAUUUGGAGAGGGACCC<miR-642b>
+AGGAUCAGUAGAAGUCAGCUGUGC<miR-1715>
+ACUGGCCUGGGACUACCGG<miR-3176>
+ACGGACCGCUUGUACGGAUAUG<miR1165*>
+UGACCUUUGGGGAUAUUCGUG<miR3518>
+AAAAUGGUGCCCUAGUGACUACA<miR-224*>
+UGUGUUUUUCCCUUCCAUCGC<miR-M15>
+CAGGGACAGCAAAGGGAUGA<miR-204*>
+AAGCAACGAGAGGUCGGUCUGA<miR-1720>
+UUAUGAAUGCUGAGGAUGUUG<miR419>
+GUGUGAUGUGACGUAGUGGAA<miR-989>
+UCAAGGAACGGAUUUUGUUAA<miR866-5p>
+UAUGACACUGACGCUUAAUAUGG<miR-64c>
+GCCUCUCUCGGAGUCGCUCGGA<miR-3183>
+AAUAAUACAUGGUUGAUCUUU<miR-369-3p,miR-369>
+UCUGUGCCGGGCGCGUGCGAC<miR-H14-3p>
+UGGCGAUUGGACAGCCGGAAG<miR-128*>
+UGAGGUAGUAGUUUGUACAGU<let-7g>
+AUUUAUGUAUUGUGUUUUGUCGGA<miR3637*>
+GGGGGUCACUCUGUGCCUGUGC<miR-306*>
+GAAGAUAUGACCUUCCUGCACU<miR-2706>
+UCAGCAGGCAGGCUGGUGCAGC<miR-3619>
+UAUGACACUGAAGCGAGAUGGU<miR-63a>
+UAGAAAGGGAAAUAGCAGUUG<miR1508a>
+AGUCCCAGGAUGCACUGCAGCUUUU<miR-1955-5p>
+AACCAUCGACCGUUGAGUGGAC<miR-181c*>
+CGUGUAUUUGACAAGCUGAGUU<miR-223*>
+CAAACCACACUGUGGUGUUAG<miR-497*>
+AUGGUUCUGUCAAGCACCAUG<miR-218>
+UGCAUCACGUGUAACCUUCCU<miR-1421af*>
+GUAGAGGAGAUGGCGCAGGG<miR-877>
+GUUCCUGCUGAACUGAGCCAGU<miR-3074-5p>
+UAUCACAGCCGGACUGCUGAUC<miR-2>
+UAACACAGUACCGAUAUUGUGA<miR-2024g>
+GUAGUUUGUGUUGUUUGUUU<miR-1638>
+AGAGGCUUUGUGCGGAUACGGGG<miR-3188>
+CAGGAUCACGAAGAAGCUAU<miR-2825>
+UGGUAACUCCACCACCGUUGGC<miR-2765>
+GUAUGUGCCCUUGGACUACAUU<miR-455b>
+UAGUAAGUAGCACGUUUGAUGAGCA<miR-3406>
+UUCAUUUGGUACAAACCGCGAUU<miR-579>
+CCUGCAUCUGCACCUGCACCA<miR1030j>
+CUUCCAUCGGAGCUAGGUAGA<miR3454e*,miR3454a*>
+GCUGUUCAAUUUUCUGCCUUUAA<let-7a*>
+GCAGCGUCCUCAAGAUUCACA<miR172a*>
+GUGAAUUCAGUUUACGUACGUU<miR2618b,miR2618a>
+UAUUGCACUUGAGACGGCCGGA<miR-312>
+AUCGGAUCCGUCUGAGCUUGGCU<miR-127>
+CUUGGAAAUGCAUGUGCUUU<miR-4089-5p>
+AUGACCGACCCCCUGACAUCGG<miR-m88-1*>
+ACUUAGUCAUCCCAAGGCGU<miR1154>
+UAACACUGUCUGGUAAAGAUGG<miR-141>
+CAGUGCAUGACUAUAUCGCCAG<miR4358>
+UUUUGUGAAACUCGUGGCUGCA<miR-2570*>
+ACUGAGAGCUCGUGUCUUAAGG<miR-3265>
+AAAGUGCUUCCCUUUUGUGUGU<miR-294>
+UUCGUUUAUUUGGACUAGAGU<miR2863b>
+GUCUCUAAAGCUAGACGUUCCGG<miR-3108>
+UUAGAGAGGGCGUUACAAUU<miR2663>
+UCCUUAACUCAUGCCGCUGUG<miR-1416>
+GUGAGUGUCCUGUUUACAGC<miR-3641*>
+UACCCGUAUUUUUAUAUCCGAG<miR-54d>
+UGCCUGGCUCCCUGGAUGCCA<miR160g,miR160a>
+CUCUGUGAUGACAAUACCUGAUA<miR-2317>
+AUUACGGUCUGUGUGCCAUAGC<miR-2226*>
+UAUUGCACAUUACUAAGUUG<miR-32>
+CAAUUUAGUGUGUGUGAUAUUU<miR-32*>
+AGGUGCCAUUCCGAGGGCCAAGAGU<miR-3085-5p>
+UGGAAGACUAGUGAUUUUGUU<miR-7>
+CGGCCCGGGCUGCUGUUCCU<miR-1538>
+CGCGCCGGGCCCGGGUU<miR-3195>
+UAUGUAAUAUGGUCCACAUCUU<miR-380>
+UCCCUCGCCCCCUCUCCGGAGCCG<miR-1381*>
+UGACUAGAUCCACACUCAU<miR-279a>
+GCUCACUGCUCUAUCUGUCAUC<miR156i*>
+CGAUCCUUGGGUUUCUGCUCUCG<miR-1001*>
+UUCUUUUCCAGGUUGGCUGCGU<miR3468>
+UGCCAAAGGAGAGCUGUCCUG<miR399b>
+UCAUGUAUUGUGGAGGGGAGA<miR-2015*>
+UGCAGAGGAACAAGGCUGAAC<miR-2347>
+UUUGGUCCCCUUCAACCGGCUG<miR-133c>
+UGCCACAGUGCCCGAUUGCCG<miR1159.1>
+UACACGUGCUCGGAUAACGCUCA<miR-248>
+UACGGCACUCUAUUUAUGGUACU<miR-2031>
+ACAUAGGAGGCUGUUUUGUAU<miR2619>
+AGUGUGGCUUGCUUAGAGC<miR-644>
+CGGUGAGAACGUACAGUAAGCA<miR-2036*>
+AAUCUCAUCAAUCUCCCAAUA<miR3444*>
+AAGUUGUGAUGAGAAUCAAUG<miR4415>
+UCCUGGACAAAUAUGAAGUAAAU<miR-982>
+UAAGGGGUGUAUGGCAGAUGCA<miR-3936>
+UGAAUGAUAUUAACGUCCACG<miR1073-5p>
+AGAAAGGUAUCGGGUGUCAUAG<miR-229*>
+UGCAUUUGCACCUGCACCUA<miR530-5p>
+CAGGGACGAGGCAGAGCAUGG<miR408b*>
+UGAGAUCAUAGUGAAAGCUACU<miR-81>
+CACAUAACCAUGGAGGUGGUUG<miR-rL1-27>
+UACGUCAUCGUCGUCAUCGUUA<miR-598-3p,miR-598>
+CGAGGAAGAUCUUGUGGCAA<miR-1503>
+UAGCACCAUAUAAAUUCAGUAA<miR-83>
+UUGCAUAGUCACAAAAAUGAGC<miR-153b>
+UGAGGGGCCUGAAAUGAGCCUU<miR-S1-5p>
+AGGCCGAAGUGGAGAAGGGUU<miR-739>
+UGUCAUGGAAUUGCUCUCUUUA<miR-281*,miR-281>
+UCGAUAAACCUCUGCAUCCAG<miR162c,miR162,miR162b,miR162a>
+AGAGUUGGAGGAAAGAAAACU<miR2275d-5p>
+CAUCUAACCCUGGCCUUUGAC<miR-1981*>
+AAUCUGAGAAGGCGCACAAGGU<miR-3200-5p>
+AGGAGAGAGUUAGCGCAUUAGU<miR-882>
+ACUCGGCGUGGCGUCGGUCGUG<miR-1307>
+CGCUUUGCUCAGCCAGUGUAG<miR-1251*>
+AAGUUGCAUAAUCGAGUUGG<miR2656b,miR2656a>
+UGAGCCCUGUCCUCCCGCAG<miR-1233>
+CUGCUACGCGCAGUGCCAUGC<miR-65*>
+UAACACUGUCUGGUAAAGAUGC<miR-141>
+AGAGCUUAGCUGAUUGGUGAACA<miR-27b*>
+CUGACCCCGACCACCCCGCAG<miR-1232>
+GGGUGACAGAGCAAGACUCUUUUCUU<miR-1273>
+CUUUCCAACGCCUCCCAUAC<miR1448>
+GAACGCCUGUUCUUGCCAGGUGG<miR-614>
+AAAGUGCCACCUGACUGGAUGA<miR-1420b>
+ACAGCAGCCUGUGUUCUCACCU<miR-2334>
+UCGGUGGGAGUAACAUUCGA<miR-278>
+AGAACUGUCUGAAUGGUUGGC<miR-1493>
+AUCCAAUCUGGGAGCACUCU<miR-1420b*>
+UUCACUGUCUUUCUUAAGGUACUU<miR-3212>
+UGGAAGACUUGUGAUUUUGUU<miR-7b>
+GGUGCUCACAUGUCCUCCUCCA<miR-764>
+UUGAGGUAAUCUUUGGUUUUG<miR-2224>
+GUUCUACGGUGUUGUGAUAUA<miR-2a-2*>
+AAGCUUCUUACGGAUCAAGUUGAU<miR4347>
+UGAGCAUGGUAGAGACAAUGAUG<miR-1688>
+UCUGCUGAAGUACUGUCAGA<miR-1645>
+AGCCAAGGAUGACUUGCCGG<miR169e>
+CAAAGUGCUGUUCGUGCAGGUAG<miR-93>
+AGGUAACAGGUUUGUUUUGUGA<miR-3030>
+AUGCUGACAUAUUUACUAGAGG<miR-628-5p,miR-628,miR-628a>
+UACUCCAGAGGGCGUCACUCACG<miR-508-5p>
+UGUCUUUUUCCGCUUACUGACG<miR-316>
+GCACCUUGGUCACCAUUAUUUG<miR-4048-5p>
+UAGCAGCACGUAAAUAUUGGAG<miR-16,miR-16b>
+ACGUGUAUGCUCGUAGCUAUAAC<miR-137*>
+UGAGUUGUCCCACAAAGAACACA<miR-2009>
+UGACCUGAUCAUGCUUACUGAGC<miR-2323>
+UUGGGAGGGUCCUGGGGAGG<miR-1982*>
+UAAGUGCUUCUCUUUGGGGUAG<miR-430c>
+UAUUGCACUAGCCCCGGUCCAA<miR-92c>
+UUGGUCCCCUUCCCCCCG<miR-1383>
+CACGCUCAUGCACACACCCACA<miR-574,miR-574-3p>
+CUCAAGGGUGUUUGUGAAAUA<miR2929>
+UUCUCGAGAAGGUGCAUGAAC<miR825>
+CAAUACUGGCAAUUACUUUUCC<miR-548a>
+CAGAGCUGUGGCAUCCACGUCG<miR2094-3p>
+ACCUUCUUGUAUAAGCACUGUGCUAAA<miR-1248>
+CGAGUUCCAGCCUCCUCAGA<miR163.1*>
+CGGUCUUGAGGCAGGAACUGAG<miR1861j,miR1861h>
+AUGCUUUGCUGGUUCAUUUUC<miR783>
+CUAUACAAUCUACUACCUCA<miR-3596d>
+ACCGGAUUUCCUUGAUUAAAG<miR1509*>
+CAAAGUGCUUACAGUGCAGGUA<miR-17a,miR-17>
+AGUGAACACAGCUGGUGGUAUC<miR-317>
+GAGCAAUGUAGGUAGACUGUUU<miR-3908>
+AUGGUUUACCGUCCCACAUAC<miR-299>
+UGCAUAGUGUGCGGCCUCCCCA<miR-1421p*>
+UGGUGCUACCGUCAGGGGUAGA<miR-3070a>
+UAUCUACAUUGAAUACCUGGCUAUG<miR-3399>
+AAGUGCCGCCAGGUUUUGAGUGU<miR-292-3p>
+UAUAUUGUACGACUCUCAUCGUA<miR-2036>
+UCAGAGGCGGAACAGUAGGUU<miR-1757>
+UGGGGAGCGGCCCCCGGGCGGG<miR-1343>
+AACAUUCAUUACUGUCGGUGGGU<miR-181c>
+UGGCAUAAUUCUGUCAAUUCC<miR3435*>
+UGGAGAGUGUUCUUAAUAGUCU<miR-2582b*>
+CACGUGCGCUCCUUCUCCAAC<miR164f*>
+UAGCGAGGUAUAGAGUUCCUACG<miR-276b*>
+AUUUACAGUCAUAUACAGUUUAUA<miR2875>
+UGAGGUAGAUUGUUGGAUGACU<let-7b>
+CAAACCACACUGUGGUGUUAGA<miR-497*>
+GUGAGUUUGAAAUUGAAAUGCGUAAA<miR-1006*>
+UGGAUAGUGAGUAAAGCGGUGA<miR-2205>
+AGGAUGCCGAGCAUAUUAUAU<miR-2503>
+GUGCCUACUGAGCUGAAACACAGU<miR-24*>
+UCACCCUUCCAUAUCUAGUCU<miR-336>
+ACAUUUUAUUUUUGGCAAUCA<miR4248a,miR4248c,miR4248b>
+UGAUUGUCCAAACGCAAUUCUUG<miR-219,miR-219*>
+GUAUCCCACUUCUGACACCA<miR-2478>
+UGCGUCUCGGCCUCGUCCAGA<miR-UL70-5p>
+UAUCACAGCCAUUUUUGACGAUU<miR-13b>
+CAGCUGCUCACGGCACUCCAGA<miR-449c*>
+AAGCACGAGUGUGGUGGAGCUC<miR-1595>
+UUGACAGAAGAGAGAGAGCACA<miR156f>
+UGAACAGCGCCUUUCUGUGUAG<miR-201*>
+CAACGACAUCAAACCACCUGAU<miR-196a-1*>
+AAUCACAGGAGUAUACUGUGAG<miR-308>
+UAAGUAGUAUCCAUUAAAGGGUUG<miR-968>
+CUAUGUAACAUGGUCCACUAAC<miR-379*>
+UGUGGAGUCCGUAAUUAGCUG<miR1036-5p>
+CGGCUACUUCACAACACCAGGG<miR-138-1*>
+UUUGUGACGUUGCAGCU<miR-153*>
+UGAGGUAGUGACUCAAAAGGUU<let-7c>
+UAAUCUCAAAUUGUAACAGUGG<miR-1889,miR-1889*>
+CGUCUCUUGAUGGUUUACUUAAU<miR-12*>
+GUGAGCAAAGUCUCAGGUGU<miR-87b>
+UAUGACACUGAAGCGUUACCGAA<miR-64>
+UAUCACUAUUCUGUUUUUCGC<miR-71*>
+CUGCAGAGUUUGUACGGACCGG<miR-3678-3p>
+GCGAGGUAUAGAGUUCCUAC<miR-276*>
+UCAACAAACAUUUAUUGUGUGC<miR-545>
+UGAGGAUCCUGGGGAGAAGAUGC<miR-1967>
+UGAGCCGUGCCAAUAUCACGA<miR171a>
+CACAAGAAUUGCGUUUGGACA<miR-2964>
+UUACCAGUGUGCACAUUUAAC<miR-3003b-5p>
+UGACUAGAAUGUUCACCUUCUUU<miR-61b-3p>
+GUCUCGGGGCAAGGACUGGAGG<miR-678>
+UUUUGCAAUAUGUUCCUGAAU<miR-450b>
+UGCUCUGCUUGGCAAACUGCUC<miR-1745>
+AAGCAGAGACAAAUGUGUUUA<miR1536>
+GUGGCAUCAUCAAGAUUCACA<miR172a*>
+CCUUGAGGGGCAUGAGGGU<miR-327>
+GGCAUGUGUGGGGCAUAAUAG<miR3635>
+GUGAGUGAUUAUGGUUUAAGUA<miR-3644>
+AGAAGAGAGAGAGCACAGCUU<miR529>
+UCGAAGGUUCUGGAGAGGACUGCA<miR4386>
+AUUGAAUAGUUUAGUGAG<miR-4206-3p>
+AGGCCGUGGAGCUUGCCAGC<miR-H23>
+GGUCUUUCUCCCUAUCAAGCG<miR3445.2*>
+AAAGUUAGAGAAGUUUGACUU<miR437u,miR437j,miR437e,miR437r,miR437b,miR437s,miR437w,miR437k,miR437n,miR437t,miR437a,miR437d,miR437o,miR437c,miR437i,miR437m,miR437q,miR437p,miR437v,miR437f,miR437l,miR437,miR437g>
+CAGCCCGGAUCCCAGCCCACUU<miR-3940>
+UGAAAUUAUAGAUUUCGUACA<miR4243>
+CGGGCAGGAGGCUGGAGGCGUU<miR-2360>
+UUUCAAAUGUCUACUGAUGGA<miR-2026>
+UAAUCUCAGCUGGCAAUCUGUGA<miR-216,miR-216a>
+UAUCAGGCAAAACAUUAGUCAAAUG<miR-3216>
+GGAAAUAAUGACUAUGCAUGGGACA<miR-2172-5p>
+AAACAUGUCCAAGUUCCUCACA<miR-2997*>
+UUGGUCCCCUUCAACCAGCUA<miR-133b,miR-133>
+AUGUCAGCUCAGUCAGUACACG<miR-3203>
+CGAUUACCAGAAGGCUUAUUAG<miR4363>
+AACACACCUAGUUAACCUCUUU<miR-329>
+CACGUGUGUGAGCUCAGCCGG<miR-2408>
+AUUGUGUCAAUAUGCGAUGAUGU<miR-592>
+AAUGGAAGGCGAGGGGAUGC<miR-H6>
+UGAGGUAGUAGGUUGUGUGGUU<let-7b>
+UGGUCUUCUGUUCUAUUUGUGCU<miR-3352>
+AGAUAUGUUUGAUAUAUUUGGUGG<miR-190>
+GCUCUGACUAGGUUGCACUACU<miR-301b*>
+UUAACAUCUUCACUUGAUUUGCAG<miR-2562>
+UAGGUCACCCGUUUGACUAUC<miR-1193>
+AUAGUUAUUGUAUUGUGUUU<miR-2351>
+GUGGAAUCUUGUGACUUUGUAAAG<miR-2801>
+CCUGUUCUUGAUUACUUGUUUC<miR-26a-2*>
+CGUGUCAGAAGUGCAUUUACA<miR-277*>
+UUAAUGCUAAUCGUGAUAGGGG<miR-155>
+UGAGAUUCAACUCCUCCAACUGC<miR-1175>
+AAGCUGCCAGUUGAAGAGCUGU<miR-22b>
+GGCGACAAAACGAGACCCUGUC<miR-1273c>
+CCACCUCCCCUGCAAACGUCC<miR-1306>
+UAAGUGCUUCCAUGUUUUAG<miR-302a>
+UAUUGCUUAUUAAGAAUUUGUGCUC<miR-3430>
+UAAGGCACGCGGUAAGUGGGU<miR-124d>
+UUGCUUUUGUUGGCCUCUGCUG<miR-1651*>
+UGACAUGGGACUAACAGACUAA<miR848>
+CGGGCGUGGUGGUGGGCG<miR-1268>
+UCUGGAAUCUUUAAUUCGCAG<miR-1005>
+AGACCUACUUUUCUACCAACA<miR-1839-3p>
+UGAUAGUGUCAACUAGUACAG<miR2612b,miR2612a>
+AACACUCUGGCGUUCCGUCA<miR-4061-3p>
+UUCCUGAUGCCUCCUAUUCCUA<miR2118g>
+UGUAAUAGUAUAAUUGUGCUCUUG<miR-3309>
+UGGGAGAUGAAGGAGCCUU<miR482*>
+AGCUCUGCUUCCUCAUACAUAC<miR-1684*>
+CCCUAUGGAUUCAGUUCUGC<miR-146b*>
+UACCACUGUCCUGGGUGCCU<miR-1663*>
+GAUCUGGACAUGUUUGUGCC<miR-619>
+GAUGAACUCAUUGUAAUAUGAG<miR-556-5p>
+GCAGUCCAUGGGCAUAUACACU<miR-455*>
+UGUCAAGUAAUGAUGGGCGUAUA<miR-2560*>
+GAACAUCACAGCAAGUCUGUGCU<miR-499*>
+UCUAGGUAUGGUCCCAGGGAU<miR-331-5p>
+UAAGGUGCAUCUAGUGCAGU<miR-18>
+GUAAGGAUUAAGAUUAAAUGUU<miR-2504>
+AUUUCACUUAGACACCUCAA<miR1916>
+UGAAGGUCCUACUGUGUGCCAGG<miR-493>
+CAUCCCACUCCAAUCCAUCCA<miR-1400>
+UGCGAGCCGUUGCAGCAGUGC<miR-2714>
+AACCCGUAAUUCCGAACUUGUG<miR-100>
+UCUUGCCGACUCCUCCCAUACC<miR482a,miR482b,miR482c>
+UAUUAUGCACAUUUUCUAGUCCA<miR-60>
+CCCUGUGCCCGUCCCACUUCUG<miR-1914>
+AUGCAAACAUGACCCUGAAUG<miR909.2>
+GAGCUGUCCAGGCUGUGAGGG<miR533b-5p>
+AUUGCACUAGUCCCGGCCUA<miR-92a>
+ACCUUGCCUUGCUGCCCGGGCC<miR-1915*>
+UGAUAUGUAUGGGUUACUUGGUG<miR-190-5p>
+UAUCACAGCCCUGCUUGGGACACA<miR-2b-3p>
+UUGGAUUACGCCCUCUGACACCUC<miR-3303>
+AUGGUUCCGUCAAGCACCAUGG<miR-218-1*>
+ACUGCACUGCAAGCACUUCUUAC<miR-17-2-3p>
+AAACCUGAACAAACUUUUUGGC<miR-2285c>
+UGAAACUUCGUAGAUUUGGUCACU<miR-1484>
+AACUGGCCCGCAAAGUCCCGCUUC<miR-193>
+UGAAGAUCCUCGUACUGGUGGCGC<miR-2842>
+GUGUUUGGUUUAGGGAUGAGGUGG<miR1879>
+UAAUCUCAAUUUGUAAAUGUGAG<miR-304>
+CGAGGAUUUUGAGACUAGAAUG<miR-240*>
+GAGCCAAGAAUGACUUGCCGG<miR169t>
+UGUCUUUUUCCGCUUUGCUGCUG<miR-316*>
+UUGGGGACGACAUCUUUUGUUG<miR447c>
+CUGACUGAAUAGGUAGGGUCAUU<miR-3136>
+UGGCAGUGUUGAAAGACGUC<miR-2227>
+AAGCUUUGCUCGUUCAUGUUC<miR783>
+UACAAUCGCCUUCCGGGUGCCUUGA<miR-3394>
+CACGUGUUCUCCUUCUCCAUC<miR164a*>
+AUGAAGUGUGAUGUGGAUAU<miR-3533>
+CACUGUGUCCUUUCUGUGUAG<miR-892a>
+UGGAACAUGCAGGUAAGGGC<miR-4006f-5p>
+CGAAGUGCGAGGGAAAGCUGAAG<miR-2219>
+UCACAUCUGGGCCACGAUGGUU<miR950-5p>
+CACACUUACUUGUAGAGAUU<miR-216b-3p>
+UGAUUUCAGGUCAAGAAUUGA<miR2665>
+CAAAAGUAAUUGUGGAUUUUGU<miR-548n>
+UUUUCGGGUGAGAGUGGUCCU<miR1041>
+AACAGUAAGAGUUUAUGUGCU<miR-2184>
+UGAGGCUUGCCUUUGAUUCUC<miR1081>
+AGCAUAGCGUGUGACCCCCGUA<miR-1421d*>
+AAGCUGCUCUAAUGAACUGAAGG<miR-1727>
+CACCCGUAUUGCUUCCUCUGAG<miR-56>
+UCAUUCACGGACAACACUUUUU<miR-382*>
+AUCCUCGGGAUACAGAUUACC<miR2111b*>
+UAGCACUCGACAUGUGACCUGU<miR-11*>
+GUUCCUCUGAGCACUUCAUUG<miR395g*,miR395e*>
+AGCGGGUCCGUUUCUAGUGUCAUG<miR-2945*>
+AAAGGCAUAAAACCAAGACA<miR-3910>
+UUUUCUCGACGCCUACCCUCGG<miR-M28>
+UAAAACAAGUCAUUUUGUUUGUA<miR-3236>
+CAAUGCUGCACUUGCUGCUC<miR-4059-3p>
+AGGACGAGCUAGCUGAGUGCUG<miR-1947>
+UGUCAUGGAGGCGCUCUCUUCA<miR-47>
+AAGGGAGCAUCUGUCGACAGU<miR-281*>
+UUGGUUUUGUGUAGUAGAAA<miR2868>
+UUGAGCAAUGCGCAUGUGCGGGA<miR-233>
+AGAGGUAGUAGGUUGCAUAGUU<let-7d>
+UAAGUAGUAGUGCCGCAGGUAAC<miR-252>
+CUGGGAUGUGGAUGUUUACGUC<miR-30b-3p,miR-30b*>
+UAGGAUCGGAGACGCAGUGAA<miR1172.2>
+UGGCGGACUCUUCACAGUUUGA<miR-2213*>
+UCACUGGGCAAAGUUUGUCGCA<miR-309>
+CUGGUCACAUGAGGUGCAGUGU<miR-1421ak>
+CUUUGGCGAUUUAGCUCCGUGA<miR-79*>
+GCUGGUAAAAUGGAACCAAAU<miR-133a*>
+UUUGGCACUAGCACAUUUUGC<miR-96>
+UGCUGGGAUCGGGAAUCGAAA<miR832-5p>
+UCUGGCUGUUGUGGUGUGCAAA<miR-3064-5p>
+UGCCAAAGGAGAUUUGCUCAC<miR399k,miR399f>
+UGAAAGGUGCCAUACUAUGUAU<miR-471-3p>
+UCGCACGUUGUGCAGGCAAGC<miR-4085-5p>
+CCAUUCAACUAUCUGUCUUCUC<let-7b*>
+UCUCUGCCUGAGGGGUACUCU<miR-1647>
+UGAGGUAGGUGUGAGAAAUGA<miR-241>
+CAGUAGGUAGAAAGAAGGCUGA<miR-2341>
+UAGCUACUCGGGAUAUGCUGUCUUU<miR-3296>
+UCUUCACGUACCUCUCUAUGGC<miR-M29-5p>
+UUUCUCAUGGACCCCCGAGUUGUGU<miR-H9-5p>
+GCUCACCCUCUAUCUGUCAGU<miR156b*>
+UCACCGGGUUAACAUCUACAG<miR-42>
+CAGAUCAUGUUAAGUGGAAUUUGAU<miR-2151*>
+AAGAUGUUCUCAAUGUAGGCUU<miR-2686a>
+UACUUGCCUUGGGGCUGUUCCUGUC<miR-3315>
+UUUCAUCUUUUGAUCCUAUG<miR-4024-3p>
+UGUUAACUGUAAGACUGUGUCU<miR-999>
+CACCCGGCUGUGUGCACAUGUGC<miR-941>
+UAUUCUUUGUUGAUGGAAAA<miR-4149-5p>
+CCACAACCUCCUUGAGUGAGCGA<miR-307>
+GAAAGUGCUUCUCUUUGCUGG<miR-518a-3p>
+CAGACUUGGCCAUGGGUAGGA<miR-1591>
+AACAACAGUCGGUAGGCUGUCU<miR-21*>
+CAUUUUGAUGGCUACCUCCC<miR-4086-3p>
+AAUAAUUUGGCCUAGCAUUCGA<miR-2521>
+GUGAAGUGCUUGGGGGAACUC<miR395l,miR395a>
+CAGAUUCGGUUUUAGGGGAGUA<miR-10d*>
+AGAGGCAUAGGGCAUGGGAAAA<miR-202>
+UCCUGCACCGCUGAAGUCA<miR-1677>
+UUCACAGGGAGGUGUCAUUUGU<miR-513c>
+UCUCCCAACCCUUGUACCAGAGU<miR-150>
+CUCUCUGGGGAGGAUAAUUUG<miR-3223*>
+UGAUAUGUUGUUUUGAAUGUCACU<miR-90b>
+UGCAACUUACCUGAGUCAUUGA<miR-891,miR-891b>
+CCAUGGGUGCGACUUGGUAAG<miR2659c,miR2659a,miR2659e,miR2659f,miR2659b,miR2659d>
+UGUCAUGGAGUUGCUCUCUUUAA<miR-281>
+UGAGGUAGUGGACUGUUUAGGA<let-7a>
+CUGGCCCUCUCUGCCCUUCCGU<miR-328a,miR-328>
+UGUGUGUGUACAUGUACAUGUGA<miR-466k>
+UUGCAUGCCCCAGGAGCUGCA<miR159a.2>
+UCUUUAACUGGGUGUUCAAA<miR-4006d-3p>
+CAAGGGGAAGUACCAGCUCU<miR-4005b-3p>
+ACAGACACUGUGACAUUGCA<miR-4035-3p>
+UAGCUUUUUAGUUUUCACG<miR-261>
+UGAACACAGCUGGUGGUAUCCAAU<miR-317>
+UGAGGUAGGAGGUUGUAUAGUU<let-7e>
+AAAUCUCUGCAGGCAAAUGUGA<miR-216b-5p,miR-216b>
+AUGUAGGGAUGGAAGCCAUGA<miR-135a*,miR-135a>
+CUGGGUAUACGCAGCUGCGUAA<miR-K12-9>
+UAAAUAUUUAAGUGGAGCCUGCGACU<miR-289>
+UGGAAGACUAGUGAUUUUGUUGU<miR-7a,miR-7>
+UGAAGGGCCUUUCUAGAGCAC<miR3952>
+UGAGGUAGUAGGUUGUAUAGU<let-7>
+UAACUAAACAUUGGUGUAGUA<miR849>
+UGGACGUUACCAAUGCCAGGGA<miR-2803>
+UGCGACAUUGGAAGUAGUAUCA<miR-3683>
+UAUAGGGAUUGGAGCCGUGGCG<miR-135a*,miR-135a-1*>
+AGGCAGUGCAUUGCUAGCUGG<miR-449c-5p,miR-449c>
+AUAAGUAGUGGUGCCGCAGGUA<miR-252b>
+CUUCCAGACGCUCCGCCCCACGUCG<miR-3180-5p>
+AUGACCUAUGAAUUGACAGCC<miR-192>
+UAAAGGCUGUUAUGCUUAUUUUUG<miR-2498*>
+UUUUCAUUGGAUUAGUGUU<miR-2742>
+ACUGCAGUGAAGGCACUUGUGG<miR-17-1-3p>
+AGGCAGAGGCUGGCGGAUCUCU<miR-1935>
+UAGUUUUAUCUUCAUGCAAUAUCA<miR-754c-2*>
+UGCAUUCUUUGAGCUUAGCAUGAUGGCU<miR-3052>
+AUAGUUGUGUGUGGAUGUGUGU<miR-669c>
+GUACGGGAGGUUGCGAGGUUC<miR-1381>
+UAUGGAAAGACUUUGCCACUCU<miR-3688>
+AUAAAAAGUGGUAUGGUACAGU<miR-740>
+UAAAGCUAGAGAACCGAAUGU<miR-9*>
+UAGACUCUAUCAGCCUUGUCC<miR3703>
+UUGAAGGAGUUCAUUGGUAUA<miR1222a>
+AUUUUAUGAGGUCGGUCCAU<miR-2729>
+AAAAGGGUGAGAUUUUGUUUU<miR-553>
+UUAAAGCUACCAACCGCCUUCA<miR-75>
+UCCGGGGCUGAGUUCUGUGCACC<miR-673-3p>
+UGAUAUGUUUGGUUUAUUGGUGA<miR-190b>
+UGAGUAUUGCCUCCUGUUGUAGU<miR-2563>
+CAGAGCCGCCUCGUGCCUCAG<miR-306**>
+UACCCAGAGCGUGCAGUGUGAA<miR-1912>
+CAGGUUACAUGUGGUACAGCAU<miR-1421al>
+ACCACCUCUGCAGCUGUUAAG<miR-1968*>
+UUCGGAUGUGAAGAUCGCUGC<miR1105>
+UAACAGUCUACAGUCAUGGCU<miR-212>
+UAUCACAGCCAGCUUUGAUGU<miR-2a>
+UUUCCUCUUCGUCUUUUGCCUCUG<miR-2715>
+GUUGGUAAAGUGGAAUCAAA<miR-133*>
+UUAGAUGACCAUCAACGAAAA<miR827>
+UAACCGGUUGAACAACUGAACC<miR-582-3p>
+CAACGAACCGAGGAAUUUUAC<miR-2569*>
+UACUUACAGAUAGAUCGUUUUCA<miR-3369>
+CGGAAGGGCAUACUAACCAGC<miR-2020*>
+UUCGCAGGAGAGAUAGCGCCA<miR391>
+UGGUAAGCUGCAGAACAUGUGU<miR-654-5p>
+AGGCAGUGUGCUGUUAGCGGCUG<miR-449b>
+UCAAGUUUUGUGUUCUGGGUCGU<miR-3382>
+AUAUUGUCUUGUCACAGCAGU<miR-1000>
+UGAUUUGAAGUUUAUGAAUGUUGUA<miR-3362>
+AAGAGCUCUUCCUGUUGUGACC<miR-1628>
+UUGACAGAAGACAGGGAGCAC<miR156d>
+CAGCUGUUACCUCACUACCU<miR-4091-3p>
+UUGAUAAGAUAGAAAUUGUAU<miR3513-3p>
+AAUGACAGAACAAGUGCGCGAG<miR-2238c>
+GCAACAAGCAUGAAAAGGCACACC<miR3638>
+CUCCGGCGCCUUCCCCCCGCCCU<miR-H24>
+CAAUCAUGUGCAGUGCCAAUAU<miR-96*>
+AUUCUAAUUUCUCCAUGUCUUU<miR-576-5p>
+UAAUACUGUCAGGUAAUGACGCU<miR-236>
+UUAUCUCAGCUGGCAACUGUG<miR-216a>
+UAGAUAAAGAUGAGAGAAAAA<miR3951>
+UGUUGACGGCGGGGAUGUUA<miR-4074-5p>
+UGGUGGGGAUGGGUUGGGGUU<miR-1594>
+ACGAAGGAUCUGCAAUAUAAA<miR902k-3p>
+AUAGCUACUGUGAGUGUGA<miR-4150-5p>
+AAUACUGCCGGGUAAUGAUGGA<miR-200c>
+UGGCUGAGUCGAAGGUUGUGC<miR319d.2*>
+GGAAUGUUGUCUGGUUCAAGG<miR166d*,miR166b*>
+GCAAGUUGACCUUGGCUCUGU<miR169g*,miR169d*,miR169e*>
+GUAAGACCAUAAACUAUUUAUC<miR-2220*>
+GUGGGCUGUAUUUUGCCGAC<miR-182-3p>
+UUAUAAUACAACCUGAUAAGUG<miR-374a>
+GCUUCUCCUGGCUCUCCUCCCUC<miR-207>
+ACCUUGGCUCUAGACUGCUUACU<miR-212-5p,miR-212>
+UCAUUGAGCGCAGCGUUGAUG<miR397a,miR397b>
+AAUGGCACUGGAAGAAUUCAC<miR-263a>
+UAGAAAGGGGAAUAGCAGUUG<miR1508b>
+UGAUUCCAUAGAGCGCAUGU<miR-1540>
+UGGAAGACUAGUGAUUUUUGUU<miR-7b>
+AUCAAAUAAGGACUAGUCUGCA<miR-3671>
+UAAGUGCUUCCAUGUUUCAGU<miR-302c>
+GUGGGUACGGCCCAGUGGGGG<miR-1225-5p>
+UUCGGGUGGUGUGGAGCGGCC<miR-2348>
+CAUGGUUCUGUCAAGCACCGCG<miR-218-2*>
+CAUCCCUUGCAUGGUGGAGGGU<miR-188>
+UAUUGCACUCGUCCCGGCCUC<miR-92b>
+UGGAAGACUAUUGAUUUAGUUGA<miR-7a-5p>
+UGAGAACUGAAUUCCAUGGACUG<miR-146c>
+UCACAGUGAACCGGUCUCUUU<miR-128b,miR-128>
+UGAGAUCAUUUUGAAAGCUGAU<bantam-3p>
+AUUCUGCAUUUUUAGCAAGUUC<miR-544a,miR-544>
+AGCAGGUGCGGGGCGGCG<miR-3665>
+GUCGACAGGGAGAUAAAUCACU<miR-2940*>
+UACCCAUAUCUCCAUCUCCAA<miR774.1*>
+UCACUGGGUAUGUAAUGACAGU<miR-2733f>
+UUUUCCCAACUCCACCCAUCCC<miR472b>
+CUACCCUGUAGUUCCGGGCUUUUG<miR-993*>
+UCACCGGGUGUACAUCAGCUAG<miR-40>
+UCUGCCAUACCCUGAGACUUU<miR-4180-5p>
+AGCAGGGUCGGGCCUGGUU<miR-2145>
+UUUGUUAUUUUCGCAUGCUCC<miR4239>
+UGGAGAGAUGGCUCAGCA<miR-3473>
+ACCUGGCCAGGCAUUCCAACUGU<miR-358*>
+GCUUGGAACUGAGCAGGAACUG<miR-1797>
+AAGGUAGAGGAACAGGCCCUG<miR-1348>
+UACCCGUAAUUUCUCGGACAGU<miR-2237c>
+UUCAACGGGUAUUUAUUGAGCA<miR-95>
+UAAAUUCGAUUUCUUAUUCAUAG<miR-1006>
+AAUUGCACGGUAUCCAUCUGUA<miR-363-3p,miR-363>
+AAAUUGACUCUAGUAGGGAG<miR-929>
+UCACCGGGUGAAAAACUACC<miR-41>
+UAGGUUUUAUGGUUUUGUUUU<miR-1815>
+UCCAUGAUCCCUGAGUGCCUAGGU<miR-3324>
+UUCUCGAUGCCUCCCAUUCCUA<miR2118a>
+UGCCCGAUGAUGUUAUUGUUUU<miR-4158-5p>
+AAAGAAUAGAAAAUCGAAGGUG<miR-3018>
+CAUCAGUUCCUAAUGCAUUGCCU<miR-217*>
+UUGCUCACUGUUCUUCCCUAG<miR-1178>
+CAUUGCACUUGUCUCGGCUGA<miR-25>
+UUGCGCUCCGAUCUCUGAGCUGG<miR-3081>
+UAAAGCUAGAUUACCAAAGCAU<miR-79,miR-79*>
+AGGUCAUGCUGGUAGUUUCAC<miR167c*>
+GUGGAGUCCUGGGGAAUGGAGA<miR-3198>
+UACACACUUCUUUACAUUCCAUA<miR-3571>
+UGGGUCAGAUGGAGCUGAGGG<miR-1682>
+CUGGGAGAGGGUUGUUUACUCC<miR-30c-1*>
+UGAGCAAACUUUCAGGUGUGU<miR-87>
+UGAGGAGAUCGUCGAGGUUGG<miR-3150b>
+AAGGAUGCCGGUUUGAGCU<miR-4058-5p>
+UGUGGAGGGAGGGCUUGGGA<miR-2982>
+AAUGUAUGACGCUGUUGACUUUUA<miR1884b>
+UAAUACUGUCAGGUAAAGAUGUC<miR-8>
+UUAAUGCUAAUAAGUGAUUUAUG<miR-155>
+UUGACUUUCAAGAAUUAGGU<miR-4007-5p>
+UUUAUUAUGUUCUUGGCGUCAGAGCCAAA<miR-3372*>
+CAAACCUCCGUAGCCUGUAUC<miR2107>
+UAGGAUUACAAGUGUCGGCCAC<miR-3159>
+UACCCUGUAGAUCCGGAUUUGU<miR-10c>
+UGGAGAGAAAGGCAGUUCCUGA<miR-185>
+UGAAGAAUUCCGAAUAUCUGAAACA<miR-3252>
+AGAAUCCUGAUGAUGCUGCAC<miR172f>
+CAUCCCGCUGUAGACGACGC<miR-2836>
+CAACGAUUUUGAUAAUCUUCCUGGA<miR-7b*>
+CAGCUAACAUGCAACUGCUCUC<miR-449a*>
+UCACAACCUCCUUGAGUGAG<miR-307>
+AAGAAUGAAAAUCCUGCCCUGUCGGAU<miR-12*>
+UCACGAGCAACCGCCCGAAAUG<miR-m108-1*>
+CAUGCCUUUUGCUCUGCACUC<miR-511>
+AACUAUUUGUUUUGGUCUUGG<miR-3004>
+CAGCGAAAAUGGACGAGAAGA<miR3468*>
+AAAGGAUUCUGCUGUCGGUCCCACU<miR-541*,miR-541>
+UCUGGGUGUUGCGUUGUGUGU<miR-954>
+AGGUGCUCCAGGCUGGCUCACA<miR-3907>
+AAGAACAGGAUGAGGUAGAUAAA<miR-2998>
+UGCGAGACCAUGGUAUGUGGA<miR-2731>
+ACAAGCUUGUAUCUAUAGGUCUG<miR-100*>
+UGCUGUCCAGUCUUAAUCUACA<miR-2016*>
+GGAUUGAGCCGCGUCAAUAUC<miR171i,miR171l,miR171h,miR171m>
+ACAUAGAAAAGGCAGUCUGCA<miR-3112>
+GCUGGGAUGAGCCUCGGUGGU<miR-749>
+CUCCGUUUGCCUGUUUCGCUG<miR-1468>
+UAUGACACUCAAUGCGAGAUGGG<miR-63c>
+CUCUGCUUGGUGACCUUGGGCGA<miR-2968>
+AAAAGCUGGGUUGAGAGGGCAA<miR-320b>
+CAGGCUUGCAUUUCAAGUAA<miR-4052-5p>
+AGGGGUGCUAUCUGUGAUUGAG<miR-342-5p>
+CUGCCCUAAGUGCCCCUUCUGG<miR-18b*>
+ACUGGACUUAGGGUCAGAAGGC<miR-422a>
+UAGCACCACAUGAUUCGGCUG<miR-995>
+ACUCUUGCAAUCAAACUUUCUU<miR-2501*>
+AAACUGAAGAGAUUUUUUACAG<miR-255>
+UGAGGGGCAGAGAGCGAGACUUU<miR-423-5p,miR-423a>
+UGGCGCCGUGGAAACAUCUACC<miR-2722>
+UGAUUGAGACGAGUCCAUAUC<miR171>
+AUAAGGUAGAGAAAUUGAUGUUGUC<miR-962>
+UGUCUACAUUAAUGAAAAGAGC<miR-3618>
+UAGCCAAGGACGACUUGCCUA<miR169u>
+CACUGUAGGUGAUGGUGAGAGUGGGCA<miR-1183>
+AAAAGUGCUUAUAGUGCAGGUAG<miR-106>
+CGGACCGCUGAUGUGGCAUG<miR-64b>
+GAGCAGAGGAUUGUCGUGCUGA<miR-1768>
+UGUCUGCCCGAGUGCCUGCCUCU<miR-346>
+ACCAGGUUAGAUUUGCGAAACG<miR-2567b*,miR-2567a*>
+GACCUGGCCCAGACCUCAGC<miR-631>
+AUUGGGAACAUUUUGCAUAAAU<miR-450a-1*>
+UGAAUUACCGAAGGGCCAUAA<miR-183*>
+GAGGGCAGAUUAUUUCUGAUAC<miR-3042>
+UGAGAAAGACUUGAGAGGACA<miR1026a,miR1026b>
+CUGGAGGACUAAGAAGGCUGAGUCU<miR-1940>
+CUUAUCAGGUUGUAUUAUCAUU<miR-374b-3p>
+GCAUGCACCCUAGUGACUUUAGU<miR-124*>
+CAAAGCGCUUCUCUUUAGAGU<miR-518d-3p>
+UACAGUGAUCAGGUUACGAUGGA<miR-1329>
+GUUCUCCUCAAACCACUUCAGUU<miR395a*>
+CAGCGGGUCUUCUUUCUUCUCA<miR-7c*>
+AACAGUGACACCAUGUAUUG<miR-3599-5p>
+GCAGUCCACGGGCAUAUACAC<miR-455>
+CUAAUGUAUCCUUCUCUUGUUGAUU<miR-2572>
+UGAAGGUCUACUGUGUGCCAG<miR-493>
+UUAGUCUCGGACCCUCACCAG<miR-2546>
+UAUCACAGCCAUUUUGAUGAGU<miR-13a>
+UAAGUGAAUUGUUUUGUGUAGA<miR-785>
+UGAAUCUAGUCUGAAGUCUGAUUUG<miR-3403>
+UGGCAAGAUGUUGGCAUAGCU<miR-31>
+CAAGAAUUUUAACCAACACA<miR-4003a-3p>
+ACGGGUUAGGCUCUUGGGAGCU<miR-125b-1-3p,miR-125b-1*,miR-125b-3p>
+AAUCAGCAAGUAUACUGCCCUA<miR-34a*>
+UUGUUGGGGUUUUUUUGUAU<miR-2434>
+CCAUGGAUCCCUACCAUGUGG<miR1510b*>
+UCAAACGAAUUAAAUCAGAGGUCU<miR-3421>
+UCGUAAAAAUGGUUGUGCUGUG<miR-13*>
+UGAGGUAGUUGGUUGUAUCGGU<let-7e>
+CCAGUUCCACGCUGCAUGCC<miR-2313*>
+AACCCGUAACGUUAUAUUUCGG<miR-55b>
+AACGCAUUGGAUUAAGGUGG<miR-4063-3p>
+ACACAGGACCUGGAGUCAGGAG<miR-3557-3p>
+UGGAAAGUUGGGAGAUUGGGG<miR1850.1>
+UCGAGGACUGGUGGAAGGGCCUU<miR-3131>
+UUUGUUACUGAUGGUGCUGUC<miR-2575>
+GGUGCUCACUCGUCCUUCU<miR-764>
+UAGUUCAACUCCAUACAGAA<miR-4081-5p>
+AAGGAGCGAUUUGGAGAAAAUAAA<miR-BART2-3p>
+AGCCCCCUGGCCCCAAACCC<miR-4313>
+CGCUAUCUAUCCUGAGCUCCA<miR390a*,miR390b*>
+GUAAUGCUUCGACUGAUUGGUG<miR-2194>
+UAUUGCACUUGUCCCGGCCUGC<miR-92b>
+GGCUUGCGAGGAUAGGAAAAA<miR482d>
+CAUGAAACACAUGGCCUGUUCC<miR-rL1-16-3p>
+AGAAGGAUCUGCAACAUAGAC<miR902j-3p>
+UCUCCAUCGUUCCUGCACCGUAGC<miR-3343>
+UAAAGUAAAUAAGCACCAAAA<miR-559>
+UAGUCGGCUUACGUCACCUUG<miR2639>
+UGAUGGGGGUGUAGUGCAGCA<miR-1550-5p>
+UUUUUUGCAGAAACGUUUCAGAUU<miR-722>
+AGAUAUGUUUGAUAUUCUUGGUUGUU<miR-190>
+UGCGUCGCGGGCUUCAUUGAAGGU<miR-2713>
+GGAUAUCAUCAUAUACUGUAAG<miR-144*>
+UUGCAAAAAUAUUUAUAUUUAACUCA<miR-2179*>
+UCAAAGGGAGUUGUAGGGGAA<miR2119>
+UCAGUGCAUCACAGAACUUUGU<miR-148b,miR-148b-3p>
+GGCAGGUUCUCACCCUCUCUAGG<miR-657>
+GCCCUUUUGCCGUUGUGCUAC<miR-130c*>
+UAACACUGUCUGGUAACGAUGUU<miR-200a>
+AAUCCUUUGUCCCUGGGUGAGA<miR-501,miR-501-5p>
+CGAAUCAUUAUUUGCUGCUUU<miR-15b*>
+UGCUGCGCAUGAAAGAGCGA<miR-M1*>
+UUCCCCAUUCUGCCUGGCCUAG<miR-1239>
+CAAAACGUGAGGCGCUGCUAU<miR-424*,miR-424>
+UGUGUCCCAUUAUUGGUGAUU<miR-3657>
+UCGGCGUAACAUGAUGUGUGCG<miR-3026>
+UGAACUUUACCAUGAAAAAG<miR-1502c-5p>
+UGUGUGUGCGUACAUGUACAUG<miR-466d-5p>
+AGUGUAACAACUCUUCUCCUUC<miR-2209b*>
+AUGUAACGCAUGUUGUUUUCU<miR822>
+GCGCUCAGGCUGGUGCUGGGGGAU<miR-1466>
+GCCGGCGGGAGCCCCAGGGAG<miR-2137>
+UCACAUUUGCCUGGACCUUUUU<miR-M1-9>
+AUUGACACUUCUGUGAGUAG<miR-514>
+CAGUGACUGCUUUUGUGCUUAU<miR-1802>
+AUGAUCUGCCAUUAUCCUUGA<miR3707>
+AUCGUGCAUCCCUUUAGAGUGU<miR-517a,miR-517c>
+CGGAAAACUCGCACCGUGAUAU<miR-2147d-5p>
+AUGGUAAACCGGUGACGUGC<miR-1193-5p>
+UCACCGGGUUAUUCUGCGACCU<miR-42b>
+AAGCCAAGGAUGAGUUGCCUG<miR169>
+UGUUGUACAUUUUCGUGCCUAUAA<miR-2507a>
+UUCCUGAUGCCUCUCAUUCCUA<miR2118a,miR2118h,miR2118k>
+UCAACACUUGCUGGUUUCCUCU<miR-505>
+UGGGAAAAUGAAAGUUGGUUAU<miR-2370>
+UACAUCAUUGAUCUUGCUAUCUCC<miR-3347b>
+CCCGUUCGGACGUUUCGGUUU<miR-H2>
+GAAAAUGAUGAGUAGUGACUGAUG<miR-3662>
+UGUUUCCUUCCCGAGGGU<miR-516a-3p>
+UCAUUUUUGCGUGCAAUGAUCC<miR1515>
+CAGAGUACGCAAAAAACAAUU<miR-2778d*>
+CUGACAGAAGAUAGAGAGCAC<miR156b>
+UCAGUAAAUGUUUAUUGGAUG<miR-545*,miR-545>
+UCGGACCAGGCUUCAUUCC<miR166a,miR166b>
+UUACCCUGUCGAACCGAGCGAGUG<miR-10b>
+CAUUGACAACAACUUGACCGGCGUU<miR-2214>
+CUUCAUUAUCAUUUCAGAUUGUA<miR-747-3p>
+UUCACAAGGUUUCCUCAAGAUC<miR-2241c>
+AUCGUGCCAAGCUUUGUGCUUU<miR536c>
+GCAGGUGAUGAGGCUUUGCUG<miR-1554>
+AAACCUGUGUUGUUCAAGAGUC<miR-649>
+CGAAGACACUAGAAUAACUAGUU<miR-2581>
+UCUCAAGUCUUAUCAUUGGAU<miR1069-5p>
+UGAGAUUCUACUUCUCCGACUUAA<miR-1175,miR-1175*>
+UACUCCGGAGAGUGGCAAUCAC<miR-510>
+AGCGGGCACGGCUGUGAGAG<miR-666>
+AAUGUUAUUGUAGCGUGGUGGUGU<miR1881>
+GGGCAACUUCUCCUUUGGCAGA<miR399f*>
+GCCCGAAUUAUGUGGGAGCUGCG<miR-995*>
+CUCGCCGGGGCUGCGUGCCG<miR531b>
+AAGAGAGCCGUCUAUUGACAG<miR-46*>
+UGCCUGGCUCCUUGUAUGCCA<miR160g>
+GCCCGGAUUCUGUGUGUGCUGCG<miR-995*>
+UUUUGAUUGUUGUACAGAAACC<miR-315b>
+UCGUUGAAGACACCUGGAAAGA<miR-UL36>
+UUAAAUAUCUGUGUGUGAAAUU<miR-2279*>
+UGGCAGUGUUUCUCCCCCAACUU<miR-1824>
+GGAUAUCAUCAUAUACUGUAAGU<miR-144*>
+ACUCACUCAACCUGGGUGUGAUG<miR-307*>
+UGGAGAAGAUACGCAAGAAAG<miR835-3p>
+AAAACUGCAUCUGGAUUGACA<miR-1422j>
+UGCACCCUGAGAGCUGGAGCAG<miR-1835>
+UAUCUCAUGUGAGCUCUUCUUU<miR-M1-13>
+UGAGGGCAGCACUGUGUCCGGG<miR-1785>
+UAUAAAGAUCCUACAUUGAGUGUAA<miR-3410>
+UUGCAUAGUCACAAAAGUGAUU<miR-153>
+UGAAAGUCCUUCACAAACAAC<miR1059>
+UCAAUCAGAACAUGACACGUGACA<miR1520n>
+CACCGGCUCACAGCUAGUACGG<miR-rL1-35-5p>
+UCUGGGUCGGCAGGGGUUUCCGG<miR-2430>
+GCUGAACUGUCUUACUCCCACAUCC<miR-2411*>
+UGAGAACUGAAUUCCAUAGGCUGU<miR-146b>
+AGGCUGACAUACAUUUCCC<miR-563>
+UAGUAGACCGUAUAGCGUACG<miR-411>
+UAGCCAAGGAUGACUUGCCUG<miR169b,miR169j,miR169m,miR169h,miR169k,miR169f,miR169g,miR169a,miR169i,miR169n,miR169l>
+UAACAGUCUCCAGUCACGGCC<miR-212>
+ACACAACCUCCUAGAGUGUGUCG<miR-67>
+AUGGCUCUGAUAUCAUGUUGGUUU<miR1871>
+UUCCUUUUAUUGAUUGUGGUA<miR1052>
+UUGGCAGUCAAGAUAUUGUUUAGC<miR-3069-5p>
+UCCGUUAUUUCCGCAUGCUCC<miR4239>
+GUGGUUCAACAAGCGCCGUA<miR-183*>
+UCUCACUACCUUGUCUUUCAUG<miR-71*>
+UGUCAUGGAAUUGCUCUCUUU<miR-281*>
+AGUCCUGUCCUGUCUACCUACUGU<miR-1553*>
+UACCACUAGUGGUCGCGCCUGGCA<miR4375>
+GACUGACACCUCUUUGGGUGAA<miR-888*>
+CUACUUCCUGGUGCCUCGCCCCAC<miR-2382*>
+GCAUCUCUGGACGCGCUCGUUC<miR-1560>
+UCUUCUCUGUUUUGGCCAUGUG<miR-942>
+UACUGGCCUGCAAAAUCCCAAC<miR-193>
+UCUUCCCUAUUCCUCCCAUUCC<miR482b>
+UUGAAAUCUCUUCAACUUUCAGA<miR-792>
+UACAAUCCGACCAUCCUCCGC<miR3469>
+CCUUCAACUUCAUGCGUGCA<miR1043-5p>
+AAAAUGUUCCAAUAUCGGGCA<miR-985>
+AUCGGGAAUAUCGUGUCCGUCC<miR-425>
+AUAUAGUCCAAUCUAUUGAAG<miR860*>
+UGACAAAAAGUGAUGUGAGUCCGUC<miR-3391>
+AGCGCCAUUUUCAGAGCUAU<miR-458*>
+UAUCACAGCCAGCUUUGAAGAGC<miR-2a,miR-2>
+UCUGGCUCCGUGUCUUCACUCCC<miR-149>
+GAACGCGCUUCCCUAUGGAGGGU<miR-523>
+GAAUUGCACUUUAGCAAUGGUGA<miR-367>
+CAGGCUGGUUAGAUGGUUGUC<miR-456>
+AGUUUUCCCUUCAAGUCAA<miR-684>
+CCUGUUGCUGGGAAUUCCCA<miR-4001c-3p>
+UACUUGGAAAGGCAUCAGUUG<miR-890>
+GUGGGCCUGACGUGGAG<miR-770*>
+UCAUUCUUAAACAAUGAAUA<miR-76*>
+GUCCCUGAGUGUAUGUGGUG<miR-670>
+UGAGACCUCCGGGUUCUGAGCU<miR-769>
+CGAUGUUGGCAUGGCUCAAUC<miR171f*>
+UCCUUUGUUUCUAUGUUUCA<miR-4006c-3p>
+UCUUUGGUUGUUUAGCUAUAUGA<miR-9b>
+UGCAUUACGUGUGACCUGCCCA<miR-1421r*>
+AAUUGCACUAGAGUGAUUUGUU<miR-2076>
+AGAGGUGUUAAUGGACAUCAUA<miR-219-3p>
+UAGAUGGUUGCAGCAUAAAUAGA<miR-2542*>
+GAACCUGACACACGGGCCUGC<miR-1572>
+GUUCCCUUCAAGCACUUCACAU<miR395h*,miR395e*,miR395j*,miR395p*>
+ACCCUGAUGACCUUAGUGUCA<miR-2038*>
+UCAGAUGUCUUCAUCUGGUUG<miR-1942>
+UUCCAAGCGGGCCACUUAAGCAUU<miR1880>
+UAUCACAGUUUACUUGCUGUCGC<miR-43>
+GGCUGCGGGAUUCAGGAC<miR-604>
+UUUGGCACCAUGACGAUCAA<miR-4099-5p>
+UAGUCCGGUUUUGGAUACGUG<miR826>
+UAUUGCACAUUACUAAGUUGCAU<miR-32>
+ACCUGGCAUACAAUGUAGAUUUC<miR-221*>
+UGAGGUAGUAGUUUGUGUAGUU<let-7b>
+UUGCGUAGGUGUUGUGCACAGA<miR-242>
+GAAAGGACGGAGGCGGCCCGCGC<miR-1456>
+AGAGUACGCAAAAAAACAAUU<miR-2776>
+AGAACAAAGGCGCUUAUCUUAU<miR852*>
+AAGUUAUGAACAUAAAAGUUG<miR821b>
+UUCAAUGGCUCGGUCAGGUUAC<miR1450>
+GCAGGACGUGAAGAGCGAGUCC<miR1124>
+UGUAGGGAUGGAAGCCAUGA<miR-135a*>
+AGACAUGUGCUCUGCUCCUAG<miR-704>
+UCACAGUGGAGGUAUACCUU<miR-4011b-5p>
+UGCAUCCCAUGUGACUGCUCU<miR-1421l-2*>
+UACAAGAUGCAUUCGAGCAAUA<miR4226>
+UCUCAUUGCCAAUGUCUUUUAA<miR-71a-1*>
+AGGCUGCGGAAUUCAGGAC<miR-604>
+ACAACCCUAGGAGGGGGUGCCAU<miR-652*>
+AAAGUAUUGUGACGUCGUUA<miR-4021-3p>
+GUGUGGUUGUCAGAAGGGGC<miR-3504>
+CAGGAUGUGGUCAAGUGUUGCU<miR-1265>
+CACCAGUCCCACCACGCGGUAG<miR-1905>
+AUUGGCACCUCUUAGAGUGAA<miR-507>
+AAACCUAGUUGGUUGCGAUAUG<miR-2e-5p>
+AAAGUGUUUACGUUUCGGU<miR-4139-3p>
+GAAAUCAAGGGUGGGUAAGAC<miR-551*>
+CCUGUCAAAGCGGCGGUGAAA<miR-13a*>
+UAAAUUAGAUUUUCUGCCUGCA<miR-2538*>
+GCAAGGGAGAGGGUGAAGGGAG<miR-1894-3p>
+GGUGGGGCAAUGGGAUCAGGU<miR-3151>
+ACAUGCUUCUUUAUAUCCUCAU<miR-206*>
+UCAAGCUCGGUUUUAUGGGUGC<miR-1473>
+AGCAUGAAGAGUUCAGAUCACGUU<miR-3583-5p>
+UGGGUUAAUUAAGUUUUUAGU<miR1525>
+UCAGACAGUUUGGUGCGCUAGUUG<miR-BART11-5p>
+CGGCUCGGCUCGGCUCCGCUC<miR-1648>
+ACUGCAUUAUGAGCACUUAAAG<miR-20a*>
+UUGGGGCUGGGUGGGGAGAGGG<miR-2412>
+AGCUUCUUUACAGUGCU<miR-103-2*>
+UACAGUAUAGAUGAUGUACUAG<miR-144>
+GUUCUGUAUAAGUUGAGCUG<miR-4081-3p>
+UGGCUUUCCAUGACAGGUUGG<miR-1462>
+UCAGGUGCUCAACUCCUAUUU<miR-2972>
+UAAUGUUCCUGCUUGUUCCUA<miR-2028>
+UAAGUGAAUGCUUUGCCACAGUC<miR-86>
+UGAGGUAGUAAGUUGUAUUGUU<miR-98>
+UCACCGGGUGACAAUUAGGAC<miR-35e>
+ACUGCUGGGUAAGACGAG<miR-3575>
+UGGCUUUUGUAGGAUGAUCAUU<miR-2719>
+AUAAGUAGACAUUGUCCGGCUU<miR-2797d>
+UGGGGCGGAGCUUCCGGAG<miR-3180>
+UGGAAUGUAUUCUUCAUUAGUUU<miR-3412>
+UGGGUACAUAAAGAAGUAUGUGC<miR-1-2-as-3p>
+CUUGUUCGUUCGGCUCGCGU<miR-375-3p>
+CUAAUAGUAUCUACCACAAUAAC<miR-633>
+AGCUGCUGACCACUGCACAAGA<miR-210*>
+CUGUCGAGCACCAUUGGGGA<miR-237*>
+UAUUGUUCUGUGGUUGGUUUCG<miR-M8-5p>
+AUUGUCCUUGCUGUUUGGAGAU<miR-2355,miR-2355-3p>
+UGUGCAAAUCUAUGCAAAGC<miR-19a>
+UGCAACGAACCUGAGCCACUGA<miR-891a>
+GCAGGCACAGACAGCCCUGGC<miR-4269>
+UAUCUCGGUGCGAUCGUAC<miR-243*>
+AUUGACUUCUGAAAGGCUAAAAGC<miR3639>
+AAGGCUGGGCCCCCGCUCCGC<miR-940>
+UAGCCAAGGAUGAAUUGCCGG<miR169d>
+ACUUUAAUGGGCUUUGGAUCAC<miR-1620>
+UUAUUGUUAUUUGUCCUUGAAC<miR-982c>
+AGAAUUGUGACUGGACAUCUGU<miR-219>
+UAAUCAGUUUGGGGAGACAAA<miR2870>
+CUUUCAGUCAGAUGUUUGCAGC<miR-30a-3p>
+UCUUUCUGCAUCUGAACCUUUUC<miR-1336>
+UUUAGUGGAAGUGACGUGCUGUG<miR-rL1-6-5p>
+GAGAGGAGGACGGAGUGGGGC<miR1858a,miR1858b>
+ACCGUUAGAUCGAGAAAUGGACGU<miR811c,miR811a,miR811b>
+AACUGGCCUACAAAGUCCCAG<miR-193>
+CUGCAGUCGGUUUCUUACUUC<miR2087*>
+UGACUUCAGUAGGAGCAGGAUU<miR-1677>
+UCCUUUGGGUUGUGGGGAUA<miR-3490>
+CGCGGGCUGAGCGCCUAACGUG<miR-1379>
+AUGCUGGGAGACGUCAUCACG<miR-1419e>
+UGCCAAAGAAGAUUUGCCCCG<miR399d,miR399e>
+AGUAUUCUGUACCAGGGAAGGU<miR-630>
+UAUUGCACUUGAGACGGCCUGA<miR-312>
+UACAUGUAAUACAUUGGCUU<miR-4195-3p>
+UCUGGUUUUCAAUGUGUAAA<miR-4113-5p>
+CUGGCUGUGGAAGCUGGCGAA<miR-928>
+AGACCCUGGUCUGCACUCUAUCU<miR-504>
+CUCUUCUUCAAAGGCUUCUA<miR477d>
+CGUUCGACACGGUUUCCUUCGA<miR-m01-2*>
+AAUCGACUUAGAAUGUAGGAUGGU<miR4342>
+CAUCCCUUGCAUGGUGGAGGG<miR-188,miR-188-5p>
+GCCACCUCUUUGGUUCUGUACA<miR-BART10*>
+UGGGCGUAUCUGUAUGCUA<miR-585>
+ACUCAAAAUGGAGGCCCUAUCU<miR-294*>
+UUCACAAAGCCCAUACACUUUC<miR-350>
+CCCCCGAGGAGGACGAGGAGGA<miR-1895>
+GCCGGAUAAAUCCUGUGUGCAU<miR-746-5p>
+UCCCUGAGACCCUAACUCGUGA<miR-125c>
+UGAUGGUUUUCGGGCUGUUGAG<miR-K12-6-3p>
+UUCACAAAGCCCAUACACUUUU<miR-350>
+GUGGGCUGGGAGCACAGGCACU<miR-1668*>
+GAAAAGUUCGGUCGGGUUUUU<miR-2284k>
+CCUCCUUCGGACGAGUGCUUGCC<miR-M25-5p>
+GAGGGUCGCUCUGUGCCUGUGC<miR-306*>
+UCGGUGGGAUUUUCGUCCGUUU<miR-278>
+UAGCCAAGGAGACUGCCCAUG<miR169q>
+CGGUCUGUCGCAGAACACGGCA<miR-3017a>
+CUUGGCACUGGAAGAAUUCACA<miR-263b>
+UGUGGACAGUGAGGUAGAGGGAGU<miR-3138>
+UCGAUGCAUGGUCCCCCCUUAGU<miR-rL1-9>
+UUGAAAGGCACUUACAGGAAG<miR-2367*>
+ACACCGCACUGGCAGGGAGCA<miR-1624>
+GUGGGGGAGAGGCUGUC<miR-1275>
+UUGAGUCUGAUGAAUCAUUAGG<miR-580>
+UGAUUUAUAAUAGGAGAGCAUAUGAUU<miR-3006>
+UGGCACUUCUGGUCUCAGACUCA<miR-2349>
+UAGAGAAAAGUUUCUAAUUACC<miR-247*>
+CGAAAGUGAGGAUAUCAAGGA<miR2666>
+UCCUGCGCGUCCCAGAUGCCC<miR-1539>
+CUCUCCUCCCGGCUUC<miR-4279>
+GAUUUCAGUGGAGUGAAGCUCA<miR-205*>
+UCAGUGGAUUUGUAGAAAGCUUU<miR-3012a>
+UCGGUAUCCUCAUCUGUACUCGU<miR-3411>
+CCGUCGCCGCCACCCGAGCCG<miR-1181>
+UCCCUUGCAGGGGCUGUUGGGU<miR-623>
+CUAGCUGCUCUGCACUGACUG<miR-1552-3p>
+AAUUGCACGGUAUCCAUCUGU<miR-363-3p,miR-363>
+CUUUCAGUCGGAUGUUUACAGC<miR-30a-3p,miR-30e*,miR-30e,miR-30e-3p>
+UGCAAUGCGUCUGAGCUCCUU<miR-1421ab*>
+UAAUACUGCCUGGUAAUGAUGA<miR-200b,miR-200>
+CAGUGCAAUGGUAUUGUCAAAGC<miR-301b>
+UGUUCUUGACGUCUGGACCACG<miR951>
+UGCAAUUGACAAGAAAAUCUUUU<miR-3259>
+UCGGACCAGGCUUCAUUCCCGU<miR166a,miR166b>
+UUAAAAGCCACUGUUCUAAGAC<miR-964*>
+AUACCUGCCACUCUGCCAGCA<miR-2402>
+GCACUUUUGUGGUGUGCAAAAA<miR-239b*>
+UACAGUAUAGAUGAUGUACUA<miR-144>
+GCUGGUCUGCGUGGUGCUCGG<miR-3663-5p>
+UAAUACUGCCUGGUAAUGAUGAU<miR-200b>
+ACCCCACUCCUGGUACC<miR-4286>
+UAACGCCACGGGGCUGAGGCUG<miR-1666>
+UGAACACAGCUGGUGGUAUCUCAGU<miR-317>
+UUGUCACUGCAGGGCCCCGCGGCC<miR-1640>
+UUUUUCAUGUAAGAGCCCAAA<miR-2160-1*>
+UGAACACCGAUAUGCGUCAUC<miR810b.1>
+UGUCUACUACUGGAGACACUG<miR-934>
+AGUUUUGCAGGUUUGCAUCCAGC<miR-19b-1*>
+AUAACGUCAUGCUGUCUACGG<miR-H21>
+GCGGGGCACUCACACACGCAUA<miR-2496>
+AGUAAGUUGAUGGGGUCCCAGG<miR-1990>
+AACAGAACAGAAGCAGAGCAG<miR415>
+UUGGUCACUUGCUUUAUUCACUC<miR-2166>
+AUCAACAGACAUUAAUUGGGCGC<miR-421>
+CUCUCCCUCAAAGGCUUCCA<miR477c,miR477d,miR477b,miR477a-5p,miR477e>
+UUCGUUGUCGACGAAACCUGCCU<miR-981>
+UGAAGCUGCCAACAUGAUCUG<miR167h>
+UUUAGGAUAAGCUUGACUUUUG<miR-651>
+UAUGUUGCAGAUUCUUCAUUU<miR902k-5p,miR902l-5p>
+UUGCAUAUGUAGGAUGUCCCAU<miR-448,miR-448-3p>
+UGUGCAAAUCCAUGCAAAACUG<miR-19b>
+UCUAAGGAAAUUAGGUCGGAUACA<miR-2843>
+GGCCAGCCACCAGGAGGGCUG<miR-3194>
+UCACACAUUAUGAGCUUUAGGA<miR-2835>
+ACUGCUGAGCUAGCACUUCCCGA<miR-93*>
+CGGAGCCGUUAUGAGAGAAGA<miR-2573*>
+UGAACACAGCUGGUGGUAUCCAGA<miR-317>
+UGCUGUCGGUGGGUUUGUUCU<miR-1629>
+UGCUGCAUCACGUUUGAUCUCC<miR-1421v*>
+GUAGUGGAGACUGGUGUGGCUA<miR-1951>
+AAGAUGUGGAAAAAUUGGAAUC<miR-576,miR-576-3p>
+ACAACGUCUUUGAAAGUAGGCAUU<miR4401>
+AGCCCUGGCCCUGCCAUCGUG<miR-2894>
+UUUAGGAUAAGCUCGACUUUUG<miR-651>
+UAUGUGCCUUUGGACUACAUCG<miR-455,miR-455*,miR-455-5p>
+GCCAUGUUGAUUUGGUGGCU<miR-4135-3p>
+UGUCUUUUUCCGCUUACUGCCG<miR-316>
+GCAUGAAGGGAGUCACGCAGG<miR160-3p>
+GAGCCAAGGAUGACUUGCCGU<miR169l>
+UGAGGGAGGAAGGGUGGUAU<miR-265>
+AGGAGCUCACACGUCUUGCAGA<miR-1421ab>
+AAAGUGAAAGGUGACUGAGAC<miR-2192>
+UAGCUUGCUUGGAGUAGCUUGCUU<miR-3288>
+UGAGGUAGUUGUUUGUACAGU<let-7g>
+UUGUACUGCACAAAAGUACUG<miR-239b>
+UGCAUAUACUCACAUGCAAACA<miR-669j>
+CAGUGCAAUAGUAUUGUCAAAGCAU<miR-301a,miR-301b-3p>
+UUUGGUCCCCUUCAACCAGCU<miR-133>
+AGGACCUGCGGGACAAGAUUCU<miR-492>
+UACACCCCCCUGCCUUCCACCCU<miR-H1*>
+AACCACACAACCUACUACCUCA<miR-3596>
+CAGGGGUCACUUUUUUGUUU<miR-1761>
+ACUGUGCGUGUGACAGCGGCUGA<miR-210>
+AAACUCCGAGGGCAGGAAAAAG<miR-M9-3p>
+UGUAUAUUACAGAGGGGGAU<miR-4163-5p>
+CGAGGUUUCACGUUUUCUAGGC<miR-1830>
+UCGGUGGGACUUUCGUCCGUGU<miR-278>
+ACUGGACUUGGAGUCAGAAGGC<miR-378>
+AGAGGCUGGCCGUGAUGAAUUCG<miR-485>
+UUCAGAUCGCCAGGUAUUAUAUG<miR-2540*>
+UAACUGCAACAGCUCUCAGUAU<miR-883a-3p>
+GCACAUUUUAAGUCGGUAGGC<miR-2216>
+UGACACUCGAUAGGAUACGGGG<miR-rL1-11>
+UUUUUCCUCAAAUUUAUCCAA<miR865-3p>
+CUGCGACGGACUAGACGCGCA<miR-2999>
+UGAGAUCAUUAGUUGAAAGCCGA<miR-80>
+UGGCUCAGUUCAGCAGGAACAGG<miR-24>
+UGGAAAAAGGAGGUGCAUUCUUGU<miR1103-3p>
+UAUCGUUACGCGCGUCGCUUAGG<miR-3345>
+AAUGGCGCCACUAGGGUUGUGC<miR-652>
+GGGCGAAUACUCCUAUGGCAGA<miR399d*>
+CUUUAUAUCCGCAUUUGCGCA<miR2112,miR2112-3p>
+UCGGCCUCGUGGAUGGACCAG<miR820b,miR820c,miR820a>
+AAGAAAGCUGUGGGAGAAUAUGGC<miR396d>
+UCCCCUCUUUAGCUUGGAGAAG<miR853>
+UGAUGUCAGCACCCAGCACCA<miR-1419e*>
+CAGAGUAUAUGUUUUUUGUUA<miR-3217>
+GGAAUGUUGUUUGGCUCGAGG<miR166g*>
+UAAAGAACUCUUAAAACCCAAU<miR-3133>
+AAUUAUCGUGUCACUCAUUAUU<miR-2529>
+CUGUGGGCCACCUAGUCACCAA<miR-134*>
+UAAGUGCUUCCAUGUUUCAGUGG<miR-302c>
+UAAGUGCUACAUGUUGGGGUAA<miR-430b>
+CUCCGUGCACUCUGCAGGCA<miR-1649*>
+AUCUGAGACUUGGGAAGAGCAU<miR-B1-5p>
+ACUGCCCUAAGUGCUCCUUCUGG<miR-18a*>
+UCUUAGUGGAAGUGACGUGCUGUG<miR-BART1-5p>
+UGGAACUUAUUUUGAACAGG<miR-4001e-5p>
+UAUACAUGAGAGCAUACAUAGA<miR-466n-3p>
+CGAAACUUGCGUGGAACAGG<miR-4000a-5p>
+AACAGGUUACUUGUGGUGCAGU<miR-1421r>
+AAUGACAAGUGCAGAUGGCGAG<miR-2238d>
+UUGUGCAAGGUACGUUGGGUU<miR-1639>
+UUCACAUUGUGCUACUGUCUGC<miR-130a*>
+UUACAUGUAUUGGGUAGGAGCU<miR-246>
+UAUUUUUUUGUUUCGUGUUU<miR-2421>
+CAAAACCGGCAGUUACUUUUGC<miR-548e>
+GGUGGGAGGUGGGGUGGGCA<miR-705>
+AGCUUUUGACCAUCUUUCUG<miR-4054-3p>
+UUGCUGGCUGUUUCUCAGUGA<miR-1687*>
+ACAGUAGUCUGCACAUUGGGUG<miR-199-3p>
+CACAGAUGAUGUGAUUCUGAGA<miR-1721>
+UUAGCCUUUAAUACUGUAAAAC<miR-3419>
+AGUCUGGAAGCUGGAGCCUGCAGU<miR-1254>
+GGCAAAUCAUCCCUGCUACC<miR169l*>
+ACAUAGUCGUACGGUGAAUGUUG<miR-999*>
+UCCUGCUGCCCAAGUGCUUAUUA<miR-252*>
+UGAUUGACACCUCUGUGAGUGGA<miR-514>
+GCCUGGGUGCCAUCCUCCC<miR-2073>
+AAGUUGGAAGUUGAUUGACU<miR-4077c-5p>
+UAUGACACUCAAGCGAGCGAAG<miR-63d>
+CUCAGGGGUGGAAGUAGGAGAA<miR-1577>
+AGGCUUGGUGCAGCUCGGGAA<miR168b>
+AACGUGCAUCCCUUUAGAGGGUU<miR-519b>
+UCGGGAAGGCAGCUGCGGCGGACU<miR-3049>
+UGUAAACAUCCUACACUCUCAGCU<miR-30c-5p,miR-30c>
+AGGAUUCUGUAUUAACGGUGGA<miR3514-5p>
+AUUGGAUUGAAGGGAGCUCCG<miR159d>
+AUGAAGUGUUUGGGGGAACUU<miR395h>
+GAGGGUUGGGUGGAGGCUCUCC<miR-296,miR-296-3p>
+UCGCUCUGAUACCAAAUGAUG<miR845b>
+CAAGUGAUACCAGACCGCUAGU<miR-2221>
+AAAAGUAUUUGCGGGUUUUGUC<miR-548l>
+CUCUGGGAAAUGGGACAG<miR-4314>
+ACAUAACAUACACACACACGUAU<miR-669o-3p,miR-669a-3p>
+CAUGCCCCCCUCCGAGGGUAGC<miR-M19-3p>
+GUUCAAAUCCAGAUCUAUAAC<miR-607>
+UGAGUUUGUGUUGCUGCUUUCU<miR-1551*>
+UUUGUACUACACAAAAGUACUG<miR-239b>
+ACCCUGUAGAUCCGAAUUUGUU<miR-10,miR-10-5p,miR-10*>
+CUUUCAGUCGGAUGUUUGCAGC<miR-30a-3p,miR-30e*,miR-30a*>
+AGCAUUAUGUAUGUGAGCU<miR-4012-3p>
+AGGUUGUCUGUGAUGAGUUCG<miR-410*>
+AGGGGGCCGUACCUCAUGCAGA<miR-1421p>
+CCCUUUUUUGGAACCAAGCCCU<miR-992>
+UGAUGGCCCUUUUGAAGGACA<miR1309>
+CGGUCAAUACCAGAUGCAAA<miR-4038-5p>
+UAGCCUGGAACGAAGCACGGU<miR1083>
+UCCAAAGGCACAAGAACAUCA<miR4250>
+GGACGCCAUCUUGACUGUGGGCAG<miR-1675>
+GGCAGGCCUUCUUGGCUAAG<miR169n*>
+ACUAUAUAUCAAGCAUAUUCCU<miR-190*>
+AAAUACUUCCUCUGAUCACUG<miR2637>
+CGUGCGUAGACGUCAGCGCAAUGC<miR-2499*>
+CCGCACUGUGGGUACUUGCUGC<miR-106b*>
+CGGUGGAUCUUGUUUUUUGU<miR3437*>
+UAUUAUGUCAUAUAUUUAG<miR-4172-3p>
+AGGGACUGCCUUAGGAGAAAGUU<miR-3199>
+GGGGAUGUAGCUCAGUGGAG<miR-1959>
+UCUCACACAGAAAUCGCACCCGU<miR-342,miR-342-3p>
+GCGUGUGCUUGCUGUGGG<miR-696>
+CGAGCUACCAUCGUGACGAUC<miR3696>
+UGGGACGAGAUCAUGAGGCCUUC<miR-1963>
+UGGGACUAUGUCAACUUACAAC<miR-1990c*>
+UUGGAUUAGUUAUCAUCAAUGC<miR-976>
+GUUUGGAGAAAUAUGCAUCAU<miR861-5p>
+UUGUACAUGGUAGGCUUUCAUU<miR-493*>
+UAAGUCACUAGUGGUUCCGUU<miR-224>
+CAGGGAAUCUCUGUUACUGGGG<miR-459*>
+GUGCUCCCUUCAAACCAAUAA<miR159j*,miR159k*,miR159b*>
+CAAAACUGGCAAUUACUUUUGC<miR-548a,miR-548a-3p>
+GGAUUGUUGUCUGGCUCGGUG<miR166n*>
+CCAAUAUUACUGUGCUGCUUUA<miR-16-2*>
+CUGGGAGGGGGAUGUUUGCU<miR-30b*>
+UGGAGGCCUGUCAGGUUCCCA<miR1315>
+CCGGAAGAGACUUACGGAUCAACU<miR4361>
+UUUUCAUAACAGCUCUGUCAGC<miR-2791>
+UAAGUCUGUUGAGUGCCAUAGA<miR-2511>
+AUUGCAUUCAGAGCGAGCUGU<miR-1702>
+GUGCAUUAAUUGGAAGAACA<miR2093-5p>
+AUUCCUGGAAAUACUGUUCUU<miR-145*>
+UCAUUGUCUGUAAACAACACAG<miR-2555>
+GCCCAAAGGUGAAUUUUUUGGG<miR-186*>
+AUGUGCCCAUCUUCUCCACC<miR164b*>
+GCAUGACACCACACUGGGUAGA<miR-878-3p>
+UCACAGUGAACCGGUCUCUUUU<miR-128a,miR-128>
+UCGGACCAGGCUUCAUCCCC<miR165a,miR165b>
+UGUAAACAUCCUACACUCUCAG<miR-30c>
+UGGAAGACUGUCGAUUUCGUUGU<miR-7b>
+GGUACCAUUGACUAAAGCUAG<miR-3101>
+UAGGUAGUUUUAUGUUGUUGGG<miR-196d>
+UUAGAUGACCAUCAACAAACG<miR827>
+AAGCUUGUUGGGUUUGGUUUGU<miR-1726>
+ACUGGACGGAGAACUGAUAAGGGC<miR-184>
+UAGUGGUUUACAAAGUAAUUCA<miR-876-3p>
+AACUCUGUCUUCACUCAUGAGU<miR-3664>
+UUAUGGUUUGCCUGGGACUGAG<miR-584>
+CCCAGAUACAAUGGACAAUAUGC<miR-2355*>
+AGGAAACAGGGACCCA<miR-4261>
+CUCGGUGGAAGACCUUCCCUU<miR-2774c>
+UCAAUCAAUGACAGCAUUUCA<miR3519>
+UCAUGCACUGGGGUCUUGAUGG<miR-2396>
+CUGCACUGACUCUUCCCUGGC<miR408e>
+AGGGUAAUUUUAUCAUUUUUAA<miR1438>
+AAAUAGUCGCUUGUCCUUUAGC<miR-2537>
+GCGGCGAGGGGAUGCGAGCGUG<miR2104>
+GUUUUGUUUGGGUUUGUUUCU<miR-2310>
+CUCGGGAAGCUAGCUGGCCUU<miR-2403>
+UUUCGGAGAAAUGGAUAAGA<miR3706>
+AGCGGAAUCCAGGACACGCGUUU<miR-3503>
+UUGAGCAAAAUUUCAGGUGUG<miR-87>
+UGGAAUGUAAAGAAGUAUGUA<miR-1,miR-1a>
+UCUCACAUGGACGCUGCCCU<miR-2409>
+AGCAUCUGCUGAUCCUGAGCUGU<miR-3089-3p>
+ACUGCACAGACCUAGGCUCU<miR-2377>
+GCUCCGGUAGCUUAGUUGGU<miR-3488>
+UGGCUCAUUUAGAAGCAGCCA<miR-3106>
+CAGGGAGGAACUGCCAGCAGA<miR-1614*>
+AAUGACAAUCGAGUGGGUGAG<miR-2238b>
+UUGGUCCCCUUCAACCAGCCGC<miR-133d>
+UAACAAGUGGGUUUGUUGACUG<miR4409>
+UCGAUAUACUUGCGUCUCCAUGCA<miR-3274>
+GGCUUCUUUACAGUGCUGCCUUGU<miR-103-1*>
+ACUUUAACAUGGAAGUACUUUC<miR-302b>
+UAAAAGGCUGUUAAAUGAUGAU<miR-1327>
+UUUCGACAAGACACAAUGCAUAAA<miR3637>
+GGCAUGGCAGACUCACCCUGC<miR-1614>
+UGGAAUGUAAAGAAGUAUGGAG<miR-1>
+UACGGUUUAGACUAUUCAUUUU<miR-3028>
+AGGCGGAGACUUGGGCAAUUG<miR-25*>
+UCGCUGCAACAGUUAGCUAG<miR-2032b>
+CGCCAAAGGAGAGUUGCCCUC<miR399l>
+GCACUCCAUCGGAGGCAGACAC<miR-3110*>
+UAACCAAUGUGCAGACUACUGU<miR-3604>
+UGGGCGUUAAUACAUUUCAUA<miR1073-3p>
+UUGCACAUCACCAAUGUUCUGA<miR-2024f>
+UAGCCAUGGAUGAAUUGCCUG<miR169y>
+AAAAUUCGAUUUCUUCUAUCAUUA<miR-1006>
+UCUUCUGCGAGCGGUGCGAGC<miR907>
+GUUGAAGGUUAAUUAGCAGAGU<miR-3084*>
+UAGCACCAUUUGAAAUCGGUU<miR-29a>
+UUCAGUGAUGAUUAGCUUCUGA<miR-677>
+AAAAGUAAUCACUGUUUUUGCC<miR-548y>
+UGGAACAUACAGGUAAGGGC<miR-4006d-5p>
+UAAGGCACGCGGUGAAUGCC<miR-124>
+UUCUUGCAUAUGUUCUUUAUC<miR835-5p>
+UAGAAUACUGAGGCCUAGCUGA<miR-K12-4-3p>
+AAGAAGGUAAUCAACAGCAA<miR-4162-3p>
+AAGAUCGUGUCGUUCUAGAUUA<miR-61b-5p>
+AAUUGCACUAGUCCCGGCCUGC<miR-92b>
+GAUGGAAGGACGGGAAGUGGA<miR-H1>
+UUUGGAUUCCGACCCCUCGUC<miR-H7-3p>
+AGUGGUUUUCCGUUGCACAUGC<miR-1988>
+UACAUCAUUGAUCUUGCUGUCUCAA<miR-3347a>
+UGCUCUGUUGAACUCAAAAGCA<miR-1744*>
+AGCCACUGCCCACAGCACACUG<miR-210*>
+UGACAUUGUAGAUCUACGUGC<miR1028a-3p>
+AGUGCUAUUCAUGUGCAAGA<miR-367-5p>
+UCUGCAAGGUAAAGUGCUGUCCA<miR-2705>
+ACGGCACGAGGAUGUUGCUU<miR-2568a*>
+AUAUUCGAUAUGUGAACGGUU<miR-2828>
+CAACUAGACUGUGAGCUUCUAG<miR-708*>
+GUAGAUUCUCCUUCUAUGAGUA<miR-376a*>
+CUCCUGACCGCGGGUUCCGAGU<miR-H3*>
+CGCGUCUUGUUCUACUCACC<miR-4056-3p>
+UCUCUCUUAGCCAAACAGUCU<miR1049>
+UAGCAGUGAGAGUUUAGCAUUCGCAAC<miR-1496>
+GGGGCUGGGGCCGGAGCCGAGC<miR-762>
+UCCAGCAUCAGUGAUUUUGUUG<miR-338-3p,miR-338>
+CGAGGCUGCGGCAAUCCCUGCG<miR-1698>
+GGUUCGUACGUACACUGUUCA<miR416>
+UAACUGGUUGAACAACUGAACC<miR-582-3p>
+AGGGACCCCGAGGGAGGGCAGG<miR-3072*>
+UUUCCGGCUCGAGUGGGUGUGU<miR-1180>
+CAAAGUUUAAGAUCCUUGAAGU<miR-561>
+UCGGUGGGAUCUUCGUCCGUUU<miR-278>
+AAAGUUCUGUGACACUCAGACU<miR-148*>
+UCCUCAUUGUGCAUGCUGUGUGU<miR-730>
+UCUGCAUCUGCACCUGCACCG<miR1030h>
+UAGCAGCACAUCAUGGUUUGC<miR-15b>
+GAGACGGAGUCGUGAGUG<miR-1410>
+CCUCAGGGCUGUAGAACAGGGUU<miR-1266>
+UGCGGUGGUUGCCGUCGGCGUGUU<miR-2526*>
+GGUCCAGAGGGGAGAUAGGUUC<miR-198>
+GGAUUGAGCCGCGCCAAUAUC<miR171k>
+UGCCAAAGGAGAGCUGCCCUA<miR399d,miR399n,miR399m>
+AACUGUUUGCAGAGGAAACUGA<miR-452>
+UGUACAAUACGAAUAUUUAGGC<miR-972>
+AGUGCAGCUGAGGACCAAGGCA<miR-2313>
+AAUGUCUUAUAUUUUGCUAUUAUC<miR-87d*>
+GCAAAGCACACGGCCUGCAGAGA<miR-330,miR-330-3p>
+AGGCCCUGAAUCAAGACCAGCAGU<miR-1291b>
+ACCACAGCUUCUGCUACGAAC<miR834*>
+GUACAAUGAUGAGACUUUGGCUCC<miR-1454>
+AGGCAGUGUAAUGUUAGCUGGU<miR-449>
+CAGGGCAGGGCAAGAGUUGAG<miR-3087*>
+UACGCUCUUACCAGCUAGAAU<miR-745*>
+UCUACAGUGCACGUGUCU<miR-139>
+AGCUUUCGACAUGAUUCUGAAC<miR-227>
+CCAAGCGGCUGCCCUGGGAGAGG<miR-3067*>
+UCCUCAGCUAGUUUUGUCUCCC<miR-2300a-5p>
+UCUCAUUCCAUACAUCGUCUGA<miR1507a,miR1507b>
+UUGGGACGAAGUGCGAACGCUU<miR-H12>
+GAGCUGCCAAGUGAAGGGCUGU<miR-745b>
+UCACACCAGAGUAACUGGGAUC<miR-1467*>
+UAAGACGGUCGUGAUGUCAGCA<miR4374a>
+CCUCUUCCCCUUGUCUCUCCAG<miR-1236>
+CUUGGUACAUCUUUGAGUGAG<miR-547>
+CACUCAGCCUCGGGGGCACUUUC<miR-512-5p>
+ACAUCCACCAGCCUAGCUCGCA<miR-48*>
+CAUCAGUUCCUAAUGCAUUGCC<miR-217*>
+UAAAAUUUGCAUCCAGGA<miR-4282>
+CUACAAAGGGAAGCACUUUCUC<miR-524-5p>
+UCUGUUCCCUCGCGCUGUCGCCGCG<miR-3215>
+ACUCUUUCCCUGUUGCACUACU<miR-130b*>
+AAUCACUAACUCCACUGCCAUC<miR-34b*,miR-34b-3p>
+ACUCUCCCUCAAGGGCUUCGC<miR473>
+GAUUGCACUAGUUAAUUAUC<miR-92>
+UCGAACCAGGCUUCAUUCCCC<miR166e>
+UAAAGUUAUGGUACCGAAGUUA<miR-9c>
+UCAAUUCCGUAGUGCAUUGCAG<miR-932,miR-932*>
+AGCUGCUGGACACUGCACAAGA<miR-210*>
+UAUGGGGCUUCUGUAGAGAUUUC<miR-3675-5p>
+UGUUCGGCGUUUUUACCUGCA<miR-3007-5p>
+AGGCUGCGGGAUUCAGGAC<miR-604>
+UAGUACGUCGUUCUCCGGACGG<miR-4053-3p>
+UAGUUUUGCAUAGUUGCACUA<miR-19a*>
+CUCUAGCCAGGACCUGACUAC<miR-344f-3p>
+UGAGCAAAGUUUCAAGUGUA<miR-87a-3p>
+UGAAGUAUGAUUCAUUAGUAGACUA<miR-3268>
+CAGCCGGUGGUGACUGUUUCCACA<miR-3040>
+CAGCACUGCUGCGCUCGGUG<miR-1737>
+UGGGAGCGGGUUCCGGCAGACGCUG<miR-1292>
+CGACGAGGGCCGGUCGGUCGC<miR-714>
+GACUUUAGCAACAACGAUUUC<miR163.2*>
+UGAGUAUUACAUGGCCAAUCUC<miR-496>
+UUUCCUCUCUGCCCCAUAGGGU<miR-3059>
+UCACCGGGUGAACAUUGGUACU<miR-35g>
+CCGUCAAAGUGGCUCGUGUUAUGU<miR-2*>
+GCGCAAUUCCCGAACGGGUAG<miR1071-5p>
+UGGCACUUCAAUUGGGCUGACU<miR-2495>
+UCGGUGGGACUUUCGUUCGUUU<miR-278>
+CGCAGCUGUUCUUUUUCCUUC<miR1104>
+ACAACAACACCAAACCACCUGA<miR-196c*>
+UCAUUGAGUGCAGCGUUGACG<miR397>
+UGACAGAAGAGAGAGAGCAC<miR156a>
+CAGCGUCAUCAGUGGCAACAG<miR-2575*>
+UUGCCAACUGCAGAGCCGCGCU<miR-2457>
+AGAGGCCUUCAGAUACUGUUUU<miR-1617>
+CAGCUCCUGCAGCAUCUGUUC<miR159e*>
+UGCGUCUAAGAUCUGUGCAGUAU<miR-2553>
+UAAGUGCUCCAAUGUUUUAGUGG<miR-302>
+UGAACGUGUCCCCUAUCGGUGG<miR-M23-2*>
+AGCUUCUUCCUCAGCUCGCUUU<miR-4123-5p>
+AAGCAUUCUUUCAUUGGCUGG<miR-1179>
+ACUUAGUUUAUAUGACCUAC<miR2605>
+UACGGUGAGCCUGUCAUUAUUC<miR-433*>
+CAAUGUUUCCACAGUGCAUCAC<miR-33*,miR-33a*>
+UGGAGACACAGCUCUGUUGGAU<miR-139*>
+UCAGUAACAAAGAUUCAUCCUUGU<miR-802>
+UAAGCUCGUCUUUGUUUUCCUGC<miR-787>
+GACUAUAGAACUUUCCCCCUCA<miR-625*>
+AGACUUGUAAUAGCAGCAUG<miR-4013a-5p>
+CCAGCACAGGCAGCUCGGACUGA<miR-2400>
+AGGGGUGGUGUUGGGACAGCUCCGU<miR-608>
+CCUCUGUCCCUACUUUUAGUGC<miR-4200-3p>
+AGGCAAGAUGUUGGCAUAGCUGA<miR-72>
+CACAGGGGAAGCUCAGUGCCAGCC<miR-3076-5p>
+GUGACCUCUACGGAACAAUAGU<miR-M8-3p>
+AUUGACCAAUCAGAACAUGACACA<miR1520q>
+UCUUGCUCAAAUGAGUAUUCCA<miR828a>
+UAAGAACUGUAUUUUGUCCAAA<miR-2790>
+AAGGCUUUCAUUAUGAUUUUAA<bantam-c*>
+CAUCAUCGUCUCAAAUGAGUCU<miR-136*>
+UCACCGGGAUUCUAUGAAGAUCU<miR-2251>
+CCUGUUGAAGUGUAAUCCCCA<miR-1267>
+GUUCCCUACAAGCACUUCACGA<miR395i*>
+GUUCCCAUGCCAUCCAUUCCUA<miR3633b*>
+UAUGUAAUAUGGUCCACGUCUU<miR-380>
+UACCCGUAAUGUUUCCGCUGAG<miR-56>
+UGGCAUCCAGAACAGCGGUAC<miR-1663>
+ACUUAAACGUGGUUGUACUUGC<miR-302a*>
+CUCACUGAACAAUGAAUGGAA<miR-181b*>
+UGACAAUGAGAGAGAGCACAC<miR535>
+CCUGAAAAUACUGAGGCUAUG<miR-875-3p>
+AAAUUAUUGUACAUCAGAUGAG<miR-944>
+GGGUGUCAUCUCGCCUGAAGCA<miR1432*>
+UCCGAGCCUGGGUCUCCGUCUU<miR-615-3p>
+CCAGUAUUGACUGUGCUGCUGA<miR-16a*,miR-16-1*>
+UGGCGUUGACCCUGUCGGUGG<miR1145.2>
+UAAGGUUGGUCCAAUCCAUAGG<miR-BART6-5p>
+CUGGGGAGAUCCUCGAGGUUGG<miR-3150>
+UGGAAUGAUUGAGCUUGAUGGA<miR-1819>
+UUCGGUUAUCUAGCUUUAU<miR-3597-5p>
+GCGUACAGAGUAGUCAAGCAUG<miR160b*>
+AGAGGCUGGCCGUGAUGAAUUC<miR-485-5p,miR-485>
+UGAAUCUUUUCUGCAAUAGUGUGAC<miR-3404>
+UAUUGCACACUUCCCGCUCUUU<miR-310b>
+GCACAUCUAGUCAAAAAUAUUGGAG<miR-3297>
+AUUCGAUCAGCCUGCACUCU<miR-1420a*>
+UAUCACAAUAGUUUAGUUGCCGC<miR-2246>
+UGUCAGCGGAGUGAGAAGACGAAA<miR4398>
+ACUGGGCUGGAAAAUCGAGUGA<miR-1389>
+CUGUAUGCCCUAACCGCUCAGU<miR-675-3p>
+CAUGGAAUAUCGGCACCCAUC<miR-2021*>
+AACCGCUCAGUGGCUCGGACC<miR-US25-1>
+GUGAGCAAAUUUUCAGGUGUGU<miR-87>
+UUGGACUGAAGGGAGCUCCCA<miR319g>
+UGCUUUAUUUGCUCGCACUCAAC<miR-3374>
+GGGAACAUUCCGGUAAGGGA<miR-4006g-5p>
+AAUCCUUGCUACCUGGGU<miR-500b>
+UUUCUUAAGUCAAACUUUUC<miR1435a>
+GAGCUCCUAUCAUUCCAAUGA<miR159a*>
+ACUCCCUCACUAACGCCCCGCU<miR-K12-8*>
+UGUCAAAGAUGUGGCGAAUACU<miR4397>
+UCAUUGCUGGUGCUCGUUGGA<miR3463>
+UCAUCUUCAUCAUCAUCGUCA<miR414>
+AAGUUGUUCGUGGUGGAUUCG<miR-382>
+AUUUCGUCUGCCAACCCGCA<miR-4173-5p>
+AGGCAGUGUAGUUAGCUGAUUG<miR-34c>
+UCGCCGGGUGGGAAAGCAUU<miR-271>
+UUGUGCGUGUGACAGCGGCU<miR-210>
+UCCCUGAGACCUCAAUUGUG<lin-4>
+AUCCCUUACUCACGUGAGCAGUC<miR-1729>
+CCGGACGAACUUCCCAGCUCGG<miR-278*>
+CUUGGCACCUAGCAAGCACUCA<miR-1271>
+UAAGCGUAUGGCUUUUCCCCUG<miR-965>
+AUAUUCGUUAAGGUUGUAAC<miR-2168-5p>
+AUGACCUAUGAAUUGACAGAC<miR-215>
+AUGCAGUUUCUGGUAUACUUCA<miR-2208a*>
+UGGAAUGUAAUGAAGUAUGUAU<miR-1>
+CCCGGACAGGCGUUCGUGCGACGU<miR-3687>
+CUGGAUGUGCUCGUUAGUCAU<miR-45*,miR-44*>
+CAGUCUUGUGGCAAGAACUGAG<miR1861g>
+UGAGAACUGAAUUCCAUAGGC<miR-146b>
+CGCACCUCGCCGUCUCUACUGCU<miR-rL1-3>
+CGGGGUUUUGAGGGCGAGAUGA<miR-193b*,miR-193b,miR-193*>
+UAUUGCACUCGUCCCGGCCU<miR-92>
+UGGAACUUAUUUUGGACAGG<miR-4001g-3p>
+UCUGUCAUUCUGUAGGCCAAU<miR-215*>
+GAGCUUUUGGCCCGGGUUAUAC<miR-208a-5p,miR-208*>
+UCGGUGGGACUUUCGUUCGAUU<miR-278>
+UGCGUUCUUACCACUGGCCUGUA<miR-2397*>
+AAUCAGACACUGCAUUCAAAGACG<miR4384>
+UUGUCUUGUGUAGUCCAUGAUAGCAUC<miR-3021>
+GUUGCUUGGGGUUAUUACUA<miR-754a>
+GCCCUCCGCCCGUGCACCCCG<miR-1470>
+AUCGCAUCAACACUCGUCUGUU<miR-2419>
+UAGUAAUUCUUCUUUGCAAAA<miR476b,miR476c>
+UGAUUUUGUUGUUUUGUAUU<miR-2293>
+UGAUCACCUCGGACGUUGCUUU<miR-1720*>
+UAGCAGCACAUCAUGGUUUGUA<miR-15c,miR-15b>
+UUCAACCAUCACGGCACUAU<miR-4051-5p>
+GCUGUGCAGGAACUAGAUAGG<miR1042-5p>
+CUCCUGAUGCCUCCCAAGCCUA<miR2118o>
+UUACAGAAAGCGUGUGUGUG<miR-4014-3p>
+UGAAGGUCUACUGUGUGCCAGG<miR-493>
+UUUAAAUGCCUUAAAUUCCCGA<miR3709b>
+UGCUAUGCCAACAUAUUGCCAUC<miR-31*>
+AGCAGCAUAGUGCAAUGGUGUCA<miR-2013>
+AACAAGACUGCGUAGACCGAG<miR-2817>
+UGUCGGUUGGUUUUUGUUUG<miR-2321>
+UGAUUGGUACGUCUGUGAGUAGA<miR-509b>
+CGCUGUCCAUUCUGAGCAUUG<miR390c*>
+UUUCCUUUCCACAAUGUUCG<miR-4006g-3p>
+AGAUAUGGGUGACUAAUACUU<miR774.2>
+UAUUGCACUUGUCCCGGCCUGU<miR-92,miR-92a>
+AUCACCAUUACCAGGCAGUA<miR-3575-5p>
+GCCACAACAGUUCGAGGACG<miR-3489>
+UUCUAGGACUUUAUAGAGCAGAG<miR-1929>
+CAACAAAUCGCAGUCUGCCAUA<miR-7-1*>
+CUAAGUAGUAGCGCCAACGGUGA<miR-252b>
+GAGCUCCCUUCCUCCAAAACG<miR159c*>
+UUUCACUGUAGAUCUACCUGCG<miR-2056>
+CUGCGCAAGCUACUGCCUUGCU<let-7i*>
+UACUCAAAAAGCUGUGAGUCA<miR-888>
+UGUGUUCUCAGGUCGCCCCCG<miR398,miR398a,miR398b>
+UGGAAUGUUAAGAAGUGUGACU<miR-1b>
+UAAAUAGAGUAGGCAAAGGACA<miR-3121>
+AAGUCCAGACAAGUGUUUUCU<miR-1422k-5p>
+UAUUGCACUUUUCACGGCCGGA<miR-313>
+UGGGGGAGGGUGCCCUGGUUGA<miR-K12-12>
+AUUCUAAUUUCUCCACAUCUUU<miR-576-5p>
+UGUCAUGGAAUUGCUCUCUUUAU<miR-281>
+UUGCCAUAAUAUGAUGUGAAUUAA<miR-3255>
+UAUUGCACCAGUCCCGGCCUAU<miR-92a>
+UGCGAGUGUCUUCGCCUCUGA<miR2109>
+UACUCAGAUUGAUAUGAGUCA<miR-880*>
+UUUUAUCUUCAAGCAAUAUCGG<miR-754c-1*>
+AAAUUAUUGUAUAUCAGAUGAG<miR-944>
+GCUCGGACUGAGCAGGUGGG<miR-3917>
+UUCGAAUGCUAUUUUCACCAGAU<miR-278*>
+UCACCGGGAGUUAAUAUGGGAC<miR-38>
+UUGGAGUUCAUGCAAGUUCUAACC<miR-3068>
+UGCAAAUCUUUCGCGACUGUAGG<miR-254>
+UGUCGAACCGCGGUUGUUCGA<miR439j,miR439b,miR439c,miR439h,miR439i,miR439g,miR439a,miR439f,miR439e,miR439d>
+GUUGUGUCAGUUUAUCAAAC<miR-599>
+UCAGGUUAUAAGACUUUCUAGC<miR819g,miR819a,miR819i,miR819f,miR819h,miR819c,miR819j,miR819k,miR819d,miR819e,miR819b>
+CAUGCCUUGAGUGUAGGACUGU<miR-532-5p>
+UAAAUUUGGUAGAAGAGCUU<miR-4216-3p>
+AAAAACUGUAAUUACUUUU<miR-548f>
+UCGCUGCGACAGUUAGCUAG<miR-2032a>
+UUUGUUGGUGGUCAUUUAACC<miR827*>
+CUCGUUAACCGCCCUCCCGAGA<miR-rR1-4*>
+AGGAUGAGCAAAGAAAGAUUUUU<miR-1255a>
+UGUUAGUAUAACUCUUAGUAACA<miR-3032>
+AAUUCACAGGCCCUAUCUUGUG<miR1428e-5p,miR1428f-5p,miR1428g-5p>
+UACUUUUAUGGAUAAGCUAGU<miR-590>
+ACGAGGUUGGUUUAUUUUGGGACG<miR1862c,miR1862b,miR1862a>
+GAGCUGUGGGUUGGUGUUGAUGG<miR-1658*>
+UGCUUGUUCACUGUGCGGCA<miR-M1>
+GUCCAGUUUUCCCAGGAAUCCC<miR-145>
+AAGUGGAGUAGUGGUCUCAUCG<miR-1175>
+UCUUCCUUGUUCCUCCCAUU<miR482>
+UUGAAGAAUUACAGGUGGUGGAA<miR-1497e>
+GUGGUUGAUUGGAUCCGUGGGU<miR-2448>
+GCGUGCAAGGAGCCAAGCAUG<miR160b*,miR160g*>
+UAAGGCCCAGGAGCGCUGCAGC<miR-1665>
+GUACAGUACUGUGAUAACUGAA<miR-101>
+UCGAGGAGCACGUGUUAUUCUA<miR-M1-4>
+CAAACUCGGAAAUUGUCUGCCG<miR-800>
+UGGUCUAGGAUUGUUGGAGGAG<miR-601>
+GAUCAUGCUGUGACAGUUUCACU<miR167b*>
+UGGAGGUUACACAUCAUGCC<miR-1421w*>
+UGAGGUAGUUUGCAAUGCUGUC<miR-84>
+CAGGAUUAGCGAUUACAGGGAC<miR2585c,miR2585e,miR2585b,miR2585d,miR2585a>
+CUGUGGGCCACCUAGUCACC<miR-134*>
+GCAAGUCAAUAAGAUUAUUC<miR-2562*>
+UAGUCCCUUCCUUGAAGCGGUC<miR-2114>
+UGCAUUUGCACCUGCAUCUU<miR530b>
+AAACCCUCCAAUGACU<miR-616>
+CGAUCUUGAGGCAGGAACUGAG<miR1861i,miR1861b,miR1861l,miR1861f>
+CUUAUCAGGUUGUAUUGUAAUU<miR-374a*>
+CUAUACAAUCUAUUGCCUUCC<let-7f-1*>
+GGCUUUUCUCUUUUUUCUUU<miR-2445>
+CUUGGAUUGAAGGGAGCUCUA<miR159f>
+UGGUAGCAGUAGCGGUGGUAA<miR834>
+CAAAGCGCUCCCCUUUAGAGGU<miR-518b>
+UUGAUAUGUCUUGUAGGGAC<miR1085-3p>
+GAAGAUUGAAACAAACAUGG<miR-4160-3p>
+AGCUGGUGUUGUGAAUCAUGCCGA<miR-138b>
+CCCUUGUUGCAAACCUCACGC<miR-988>
+GGCAGCCGAGCGAGGGCCUCGG<miR2907c,miR2907d,miR2907a,miR2907b>
+AUGAAUUUGGAUCUAAUUGAG<miR865-5p>
+UAAAGUGCUUAUAGUGCAGGUA<miR-20a,miR-20>
+AGAGUUGCGUCUGGACGUCCCG<miR-219-3p*,miR-219-1-3p>
+AUCGCGUUUGGUUACGUC<miR-4153-3p>
+UAUGACACUGUUGCGUAGCAUG<miR-64a>
+UGGAGGAUCUGCAUCGUAAAC<miR902i-3p>
+AAAAGUAAUUGCGGUUUUUGCC<miR-548c-5p>
+UCUGAUCGUUCACCUCCAUACA<miR-1843-3p>
+ACCUUGGCUCUAGACUGCUUACUG<miR-212*>
+UCCCUGUUCGGGCGCCA<miR-1274b>
+AACAUCUGUAUAUACCUUUGAU<miR-963*>
+CGGCACAUGUUGGAGUACACUUA<miR-305*>
+UAGCUGACGAUGGAAUCUUUCUA<miR-3244>
+GGCAUCGGGGGCGUAACGCCCCU<miR1310>
+CAAAGUGAUGAGUAAUACUGGCUG<miR-3609>
+UGACCGAUCUCUCUUGGUGUUC<miR-29c*>
+CCCAAUAUUAUUGUGCUGCUU<miR-16b*>
+AACGUGACACUUUAGAAAAC<miR-1798*>
+ACAAAAAAAAAAGCCCAACCCUUC<miR-3613-3p>
+UCACUGGACCUAGCAGAGCU<miR-2339>
+GCUCUGACUUUAUUGCACUAC<miR-301*,miR-301a*>
+UGGCUCUGAUACCAAUUGAUG<miR845e,miR845d>
+GCAUCAAAGUCGGUUUGUCAUA<miR-2a-1*>
+UGGAGUGUGACAAUGGUGUUUG<miR-122,miR-122a>
+AACCAGGCCACCAUUCCUCUCCG<miR-K12-12*>
+UACUCAGGAGAGUGGCAAUCAC<miR-510>
+GGCAUUGAUAUGUGGGUUGG<miR-4201-5p>
+AACCCGUAGAUCCGAACUUGU<miR-100>
+UCUUUGGUUAUCCAGUUUGA<miR-9-5p>
+ACAAAGUGCUUCCCUUCAGAGUGU<miR-520g>
+UGUGUAACCUUCUGCCUUUGU<let-7a-1*>
+AUAAUAAAAAUAAUAAUGA<miR1533>
+AUGUCACUGAUUAGGCAUGAUGAU<miR4387d>
+CCCGUUCCAACAAUGUUCCG<miR-4019-3p>
+AAUCACUAGCCACACAGCCAGG<miR-34*>
+GGCUUGCAUGGGGGACUGG<miR-4327>
+AACUGUACUGGAAGGAUGGAUGG<miR-2384>
+AAUCAUUCACGGACAACACUU<miR-382*>
+AGCUGUCUGAAAAUGUCUU<miR-626>
+CAUGCCCCAGUCGUGUUGCAGA<miR-3528>
+UUUAGGUCGAGCUUCAUUGGA<miR843>
+ACCGGAUGUCGGAAAAGGUUU<miR1441>
+UAAUACUGUCUGGUGAUGAUGUU<miR-200>
+AGGGGGCAACAGAACAGUCCUGA<miR-1606>
+AGACAAAAAUAUAAAUAACAAA<miR2923>
+AAAGUGCAUCCUUUUAGAGGUU<miR-519a,miR-519b,miR-519b-3p>
+GAGCUUUUGGCUUCUCAGAAGUCA<miR3639*>
+UUGUCAUCGGGGGUAUUAUGAA<miR-959>
+UUAGAUUCACGCACAAACUCG<miR403c,miR403,miR403f,miR403e,miR403d,miR403a,miR403b>
+UCAGUGCAUAACAGAACUUUGU<miR-152>
+UUCCACAGCUUUCUUGAACU<miR396b>
+UUGGGGCUGGGGAGAGGCGGG<miR-2374>
+ACUGCAUUAUGAGCACUUAAAGU<miR-20a-2*>
+UGGGGUUUCAAUAGGCAUUUACC<miR-3038>
+UUUCGGUAGUUAACUGCUGAGG<miR2627>
+AUUACUGAGAGAUGUCAUCACA<miR-1419g>
+ACUGCAAUGUAAGCACUUCUAG<miR-106*>
+UCACAAUUCCAAGUAAGCCUGC<miR-2244>
+GUGUGUGGAAAUGCUUCUGCUA<miR-147a>
+UUCCUGUCAGCCGUGGGUGCC<miR-3058*>
+UAUGUAAUAUGGUCCACUCUU<miR-380>
+UAUACAUACACGCACACAUAAGA<miR-466e-3p,miR-466a-3p>
+ACUUUAACAUGGAGGUGCUUUCU<miR-302b*>
+CAGCGCACUCAAGUUCUCAUGC<miR-1409*>
+UAUCACAGCCAGCUUUGAUGAGC<miR-2a,miR-2c,miR-2,miR-2b>
+UCUCCCAACCCUUGUACCAGUGU<miR-150>
+UUUGAUCUGAUGAGCUAAGCUGG<miR-3079-5p>
+UGGAGUGUGACAAUGGUGUUUGU<miR-122>
+UAUCUAUUAAAGAGGCUAGC<miR-701*>
+UAUUGCACACUUCCCGGCCUUU<miR-310>
+CAUGGGUCUGGUUGGGCCCGC<miR-3091-5p>
+GUUCCCUUAAACGCUUUAUUG<miR395f*>
+UAUUGCACUUUUACUGUACC<miR-4009c-3p>
+UGGCUCUGAUUUCCGCUUGUA<miR-3256>
+CAACUAUUGAUCGGGCAGGACAA<miR-2859>
+UACCCUGUAGUUCCGGGCUUUU<miR-993>
+UUUAGAGACGGGGUCUUGCUCU<miR-1303>
+GCUACUUCACAACACCAGGGCC<miR-138-1*>
+UGGAAGUAAUAGGUUCUCACU<miR2609b,miR2609a,miR2609c>
+UCUUGCUUAAAUGAGUAUUCCA<miR828>
+GCAGAGUGCAAACAAUUUUGAC<miR-759>
+GGAUAUGAUGACUGAUUAUCUGAAA<miR-3535>
+UAUUUAGAAUGGUGCUGAUCUG<miR-465b-5p>
+UUUUAAUACUGAGGUGCGAAUG<miR-I7>
+UGAGAUCAUUAUUCAAGCUCUUC<miR-753e>
+AGAGUUGUAUGGAACGAAAGAU<miR1507*>
+UUGUGCGUGCGACAGCGACUUC<miR-210>
+AUUCGGUCCGGAGUCAAUGGG<miR-2214*>
+AUCACAUUGCCAGUGAUUACCC<miR-23c>
+GGCAUAUGUGUGACGGAAAGA<miR3634*>
+UACAAAUUCUGUGGUAGUAGGU<miR-2814>
+UCACUGGGUGUAUGAAGAUUGU<miR-2733d>
+UAGCCUGCAGUACAGAGGACUGG<miR-2353>
+GGGUGCAUUGCGGAGCGAGC<miR-4019-5p>
+GCUCACUCUCUUUCUGUCAUA<miR156d*>
+UCGAGAUCUCUACGAGAUUACAG<miR-M7>
+UUUGUUCGUUUGGCUCGAGUUA<miR-375>
+GUGAGUUUAUCUAAAUAUGCCC<miR-3643*>
+UACAUGUAUAAAAUUCUGAGGAUG<miR2878-5p>
+AAAGGAACGAUCGUUGUGAUAUG<miR-5>
+UUCAUAAAGCUAGAUUACCAAAGCAU<miR-79>
+GCAGUUCUGAGCACAGUACAC<miR-4277>
+UACAUAGACCAGUUCGGACGG<miR3452>
+AAGCCAAGGAUGACUUGCCGG<miR169d,miR169l>
+AGGUUGUGUGUUUAUUCUUU<miR-2420>
+CCCCUCGGCUGCUACAUUGUAU<miR-2756*>
+UGGGUCACAGAAGAGGGUCUGG<miR-2366>
+UCAUCCAUCUCUGAAAUUAGAC<miR-2228>
+UGAUGCAUGCUACUUGGUUU<miR-36a*>
+UUGAGCCGUGCCAAUAUCACA<miR171f>
+UACUGGCCUGCUAAGUCCCAAA<miR-193>
+GGCUCAGUAGCCAGUGUAGAU<miR-222*>
+AGUUCUGGGAGAUGUUAUCACG<miR-1419c>
+AGGGUAAGCUGCACCUCUGAU<miR-555>
+CAUCUUCCAGUACAGUGUUGGA<miR-141*>
+CAAUAUGACUACAAGGCAAAUC<miR-33*>
+CAAUUCGAAUCUCGGGGAAUU<miR-10a-3p>
+CCUUCAAGGCAAAGGUUUUCU<miR-1422n*>
+UAAUGUGAUGAUGAAAUGACG<miR418>
+UUUAACAUGGAGGUACCUGCUG<miR-302c*>
+AAAAGUUCGUUCGGCUUUUU<miR-2284g>
+UCGAUAAGCCUCUGCAUCCAG<miR162b>
+AGCCUGCUGAGAGUGAAAUUG<miR-2984>
+AAAGCAGCUGUACCAUUUAC<miR-562>
+GCAGAGAACAAAGGACUCAGU<miR-3919>
+GGGCAACCCCCCGUUGGCAGG<miR399g*>
+UCCCGUGGAGGCAGCCGAUG<miR2098-5p>
+UCACCGGGUGAAAACUUGCAAG<miR-35>
+GUGCGUGAUGACAACUUUGGCCGU<miR-1341>
+UCGGCCUUGAAUGUUAGGAGAA<miR1314>
+CUGUACAGCCUCCUAGCUUUC<let-7a-2*>
+CAAGCUCGCUUCUAUGGGU<miR-99a*>
+ACCAUGACCUUCUAACCUCUGC<let-7b*>
+UCCCACUACUUCACUUGUGA<miR-4301>
+ACAUUCUUAUAUUAUGAGACGGAG<miR1120>
+AAACUCGAAUGAAUGUUUUGGC<miR-2284t>
+ACUGCAGUGAAGGCACUUGU<miR-17*,miR-17-3p>
+UACUCUGUAUUAGGCACUUAG<miR-2319b>
+AAAACUGUCUAAUUACAGUUGU<miR-1537>
+UGGAAUGUAAGGAAGUGUGUGA<miR-206>
+UUUGUUGGGAAUGAAUACAUAUU<miR-1808>
+CACAGAACAUGCAGUGAGA<miR-1912-3p>
+UGAGAUGAAGCACUGUAGCUCG<miR-143>
+UAUGUUAACUGAUUUCAUGGAU<miR4382>
+AUGAGGUGCUCUGGAGAGUGGA<miR-2451>
+AACAUUCAACCUGUCGGUGAGUUU<miR-181c>
+UUCAAGAAAUCUGUGGGAAG<miR396c>
+AGGAGGCCAUAGUGGCAACUGU<miR-764-3p>
+UGUAGAUACGAGCACCAGCCAC<miR-3935>
+GAAGUAAAGAACCGGCUGCAG<miR2087>
+GGUUGUAUUAUCAUUGUCCGAG<miR-374*>
+GCCGGGCAGUGGUGGCACAUGCUUUU<miR-1946b>
+UAAGCUCAAUUAACUGUUUGCA<miR-1007>
+UGUGCUGGAUUCUCUUCCUGAA<miR-M1-3p>
+GGCAAUAUCACGAUGUGCUGUUG<miR-4035-5p>
+CAUGCCUUUAUCAUGUCCG<miR-4066-3p>
+AGACGUGGACUGGAACACCUGAG<miR-1779>
+GGAGCUGCCAAAUAAAGGGUGAU<miR-2159-3p>
+UAUUUAGAAUGGCGCUGAUCUG<miR-465c-5p>
+GACACUGUUUUACACUUACCCGA<miR-2155>
+UAUUGCACUUUUCACAGCCUUA<miR-313>
+AGGGGCUUUGGGCAGCAUCUG<miR-1735>
+UGUGCCGUGUGACAGCGGCUGA<miR-210>
+CAGGCUAUCAGCUGGUAUACAG<miR-283*>
+GGGCUGGGAGACGAUCCCU<miR-1343*>
+GUAAGCAUUGCAAAAUGUAGUUGUU<miR-2497*>
+GUACACGUGCACGGAUACGCUC<miR-248>
+UGGCCCACAUGUUAGUGCCACAAC<miR1847.2>
+GAGAGCAGUGUGUGUUGCCUGG<miR-2278>
+AGGAGGCAGCUCUCUCGGGAC<miR-650>
+AGCUACAUUGCCCGCUGGGUUUC<miR-H14*>
+UGUGGAAGGUAGACGGCCAGAGA<miR-3190>
+UGCCAAAGGAGAGUUUCCCUG<miR399h>
+AUCAUGCGAUCUCUUUGGAUU<miR393b*>
+GUGGUUUUGAUGCCAUCUUGGA<miR-2721>
+GUAGGUUGUGGGUUUUUGUUU<miR-2369>
+UCAUCCUCAUCAUCCUCGUCC<miR414>
+UCGGAUCAGGCUUCAUUCCUC<miR166i,miR166j>
+ACAAAGUUUUAUACUGACAAU<miR4245>
+GGCAAGUCAUCUGGGGCUACG<miR169p*>
+UAGGAUUCAAUCCUUGCUGCU<miR1425>
+CGUCUCAAAGGACUGUGAGCCA<miR-2b-5p>
+AGGUUGUUUGGUUUUGUUUU<miR-1814>
+AGAUGCUCAUUUGAGCAAGCAA<miR828*>
+CAGAAGGGGAGUUGGGAGCAGA<miR-3154>
+AAGAUGUUCUUUAUGUAGGCUCC<miR-2686b>
+AAAAGUAACUGCGGUUUUUGCCU<miR-548w>
+GUAAGUGGUGUAGAUGAAACA<miR-1010*>
+UUGACAGAAGAUAGAGGGCAC<miR156g>
+UUCCUGAUGUCUCCCAUUCCUA<miR2118e>
+UAAGUGCAUGUAUGGUGCUA<miR-4017-3p>
+ACUUGGUCGGCGAUUUAAUAUUA<miR-230*>
+UAGAAAGUUGGGCUGUUGAGA<miR-1376>
+GGGGUUCACCGAGCAACAUUC<miR-3581>
+UAGGUAGUUUCCUGUUGUUGGGA<miR-196b>
+UAAGGCACGCGGUGAAUGUCA<miR-124-3p>
+AGCUAAUGAUGAGAGAAU<miR-2033>
+UGUGUGCAUGUGCAUGUGUGUAA<miR-466j>
+CUAGACUGAAGCUCCUUGAGG<miR-151-3p,miR-151>
+UAGAAUGGUCUGGCGACGUAC<miR3450*>
+UGGGGUCACAGGGUGGUUGGC<miR-1414>
+UUUCUUAAGUCAAACUUUUU<miR1435>
+UGGAAGACUGAUGAUUUGCUGA<miR-7c>
+UUGGACUGAAAGGAGCUCCU<miR319c>
+CACGUUCCCCGCGUCGGGCACUU<miR-B7>
+CAAGCUCGUUUCUAUGGGUCU<miR-99a*>
+UAAGCUCGUUUUAGUAUCUUUCG<miR-787>
+CGUCAUCUCACAGGUGAAUCC<miR807a,miR807b,miR807c>
+AGGGGGUCGUACGUCAUGCAGA<miR-1421g>
+UAAUAUACCAUUUAUUAAGCUGAG<miR-3386*>
+CAGUUUGUCUCUUCUUUGUCU<miR-3112*>
+CUCCUAUAACGUCUGAUGAUUAC<miR-216-3p>
+UGUAAACAUCCUUGACUGGAAG<miR-30e>
+CGUACUCGUCGUUACGUGUUG<miR-3379*>
+UCCUAUGCUAACACGUGCGCGUG<miR-m01-4>
+CACCUUGCGCUACUCAGGUCUG<miR-3200-3p>
+CAUGACACAGAUUAAAGGAUGUG<miR-66>
+CUGCACUGCCUCUUCCCUGGC<miR408a,miR408b,miR408c,miR408d,miR408>
+UGUAACUUGUCGUGGGACGGGCAU<miR-rL1-35-3p>
+UGCCAAAGGGGAUUUGCCCGG<miR399g,miR399k>
+UAGCCAAGGACGACUUGCCUG<miR169q>
+UGGAUUGGUCAAGAGAACCGCA<miR3440>
+CCCCACCUCCUCUCUCCUCAG<miR-1224*,miR-1224-3p>
+UUGUACAUGGUAGGCUUUC<miR-493*>
+UAGGCUGCUAAUGCAAGC<miR-4013b-3p>
+AGGGAACUUCUGCUGCUGAUAUA<miR-6*>
+AAACGCCAUUAUCACACUA<miR-122*>
+UACCCGUAGAUCCGACUGUGGG<miR-100>
+UUAGCACUGGAGCAGAGUCA<miR-2980>
+GGUCUUGUUUGGGUUUGUU<miR-331*>
+AUAUGAGUUUAUAUUUACA<miR-4190-5p>
+GCAGCACCAUCAAGAUUCACA<miR172b*>
+UAGCCAAGGAUGAAUUGCCAG<miR169>
+CAGUGCAAUGUUUUCCUU<miR-4295>
+AGCUGUCUGCAAAUGUCUU<miR-626>
+UCAUUGCAAAACUGUAUACGA<miR1215>
+UUUUGCAAAGUAUCACAGCCUGU<miR-2691>
+UGGACUCUCCAUUUUGUAUUGCG<miR-2574a>
+UAACACUGUGCAACUAAGUCC<miR2588b,miR2588a>
+AGCGUUUCAUACGUUCCUUA<miR-4067-3p>
+AUAUGUAACGUUUUUGUUGUCCU<miR-3327*>
+UGUCUUUUGCUCUGCAGUCA<miR-511>
+UUAAUGCUAAUAGUGAUAGGG<miR-155>
+UAGCACCAGGGUAUAUCGGGAU<miR-746-3p>
+UAAAGUGCUGACAGUGCAGAU<miR-106b>
+GAAAGUGCAUCCUUUUAGAGGU<miR-518b>
+UUCCGCGCUCUACGCCAGC<miR-2903>
+GUAAAUGUGAUAAUUGUUUGUAA<miR-2564*>
+UAGCUGCCUUGUGAAGGGCUU<miR-980>
+AAUUGCACCCGUCCCGGCCUGA<miR-92b>
+AAUGACAGAUCAGUGCGCGAG<miR-2238a>
+UAAGUGCUUCUCUUUGGGGUUG<miR-430d>
+UUGCGUAGGCGUUGUGCACAG<miR-242>
+UGGAGAGAAAGGCAGUA<miR-4306>
+AAUAUUUUUAACGAUUUUC<miR-4213-5p>
+UGAGUACCCGCUGCGCCCGAGAGAG<miR-3413>
+UAAAUGUGCAAACUGGUAAUGA<miR-3003a-3p>
+GUGGUUUUGGUUUCCCUCUU<miR-2301>
+UAUUGCACUUCCCUAGACUG<miR-92e-3p>
+UAUUGGCGAGGUUCAAUCAGA<miR171a*>
+UGUCAUGGAGUCGCUCUCUUC<miR-46>
+UCCCUGAGCAAAGCCAC<miR-4319>
+ACUGCAGUGUGAGCACUUGAAG<miR-20a*>
+GAAUGGGGCUGUUUCCCCUCC<miR-3092>
+CCAAGUCUUGGGGAGAGUUGAG<miR-710>
+AAGCACCACGAGAAGCUGCAGA<miR-49>
+AACAGGUUACCUGUGGUGCAGU<miR-1421k>
+UCCAUCUUCCAGUGCAGUGUUG<miR-141*>
+AGUUGUUACUUCCUCAGAUGA<miR-2733i*>
+GUGAGCAUCCUUACAUUUUGUU<miR-2547*>
+AGCACUCACUGGGGGUUUGGUC<miR-M1-8>
+UGGUAUCAUGUUGCAAAUGGC<miR1217-5p>
+CUAUACAGUCUACUGUCUUUCC<let-7f-2*>
+UCUCACACAGAAAUCGCACCCAUCU<miR-342>
+ACUGGACUUGGAGGCAGAA<miR-378b>
+CUUCUUGUGCUCUAGAUUGGU<miR-578>
+AAUGAUGUUAUUUUAAUG<miR-4198-5p>
+AGUUUGUAUUGUUUCUUUUG<miR-2479>
+UUCACAGUGGCUAAGUUCCGCC<miR-27a>
+UUUGAGCGGGAUCUGUUAUCGUG<miR-1707>
+UUCACGUCGGGGGUGUUUGUG<miR-H17*>
+AUAAGUAGUAGUGCCGCAGGU<miR-252>
+CAAAGCGCUUCCCUUUGGAGC<miR-518d-3p,miR-518d>
+ACAUCCCUUCUGUCUGCACCUGU<miR-1380*>
+AGCUACAUCUGGCUACUGGGUCUC<miR-222,miR-222a>
+AGUGGGGAACCCUUCCAUGAGG<miR-491,miR-491-5p>
+AGGUGGGUAUACUGCCAAUA<miR394a*>
+UUGUCCCGGCAUCCCGAACGU<miR3462>
+UAAUUGCUGUUUUAAAAAUA<miR-4177-3p>
+CUUCUCGUCCCCGUCUUCUUCAGA<miR-I5*>
+AAAGACAUAGGAUAGAGUCACC<miR-641>
+AAUCAUACAGGGACAUCCAGU<miR-487a>
+GGGUUCCUGGCAUGCUGAUUU<miR-23b*,miR-23b-5p>
+ACCACCAACCGUUGACUGU<miR-181a-2*>
+UUGGAUUGAAGAGAGCUCCC<miR159b>
+UCAAAAUCGUUGGCAAUGGCU<miR-3495>
+UCAUAAGACACACGCGGCUCU<miR-970>
+ACUCUCAAAGUGGUUGUGAAA<miR-2a*>
+AGGUGUGUCUGUAGAGUCC<miR-3650>
+AAAAUUUCUUGCCAGGAGAG<miR-4146-3p>
+AUAGUUUCUCUUGUUCUGCAC<miR413>
+CGUGAUAUUGGUUCGGCUCAUC<miR479>
+UGGCAAGAUGUCGGAAUAGCUGA<miR-31b>
+CAAAGUGCUUACAGUGCAGGUAG<miR-17a-5p,miR-17-5p,miR-106a,miR-17>
+CAGUGCAAGUGUAGAUGCCGA<miR-3666>
+AUCUUGGUCAUAUAGUGUUG<miR-141*>
+UCGGACGGUCUGGUGCGCUUGAU<miR-rL1-14-5p>
+ACUGAGGUCUGGGUGCAGCUGA<miR-1748>
+AACCAUGUUAAUAGCAGUUG<miR-4110-5p>
+GCUCACUUCUCUCUCUGUCAGU<miR156a*>
+CGAGCCGAAUCAAUAUCACUC<miR171b,miR171b-3p>
+CUCCGUGCACACCCCCGCGUG<miR-715>
+UUCCUGUGAUGCUCAUGAGAA<miR-1458>
+UCGCUUGGUGCAGAUCGGGAC<miR168a,miR168,miR168b,miR168-5p>
+UGAACUAUGCAAUUUUCUACCUUAC<let-7*>
+AAUGGAUGCGAUGGUUCCCAUGCU<miR-3109*>
+AAGUGCUGUCAUAGCUGAGGUC<miR-512,miR-512-3p>
+GGUCCAGAGGGGAGCUAGG<miR-198>
+UUUCGAGACCACUCUAAUCCAUU<miR-956>
+ACAUGCUUCUUUAUAUCCCCA<miR-206*>
+CUUGGCACUGGUAGAAUUCACU<miR-182>
+UAAAUAUCAGCUGGUAAUUCU<miR-283>
+AGUGAAUGAUGGGUUCUGACC<miR-1257>
+UCGAUUCCCUGCCAAUGCAC<miR-1939>
+UAUUGGUGCGGUUCAAUGAGA<miR171c>
+GGCGUUUUGUUUUAGAUGUCU<miR-2048*>
+GAGGGACUUUCAGGGGC<miR-365*>
+CCUGCAGCGACUUGAUGGCUUCC<miR-1184>
+CUCUCCUUCAAAGGCUUCUA<miR477f>
+CGAGGGCAUUUCAUGAUGCAGGC<miR-3616-3p>
+AUGUUUAACAAGUGUCUUU<miR-4193-5p>
+UGAUGUUAUUUGUGGUAUAAA<miR856*>
+UCACUGGGCAUAGUUUGUCGC<miR-309>
+CUAAGUAGUAGUGCCGCAGGUAA<miR-252b>
+AUGAUGGAUCCGACCAUGAUG<miR842*>
+CAGGCUGUAAUAGAAAGGCU<miR-2812>
+UCACCGGGUGAAAAUCAAGGC<miR-35b>
+AGCCUAUCCUGGAUUACUUGAA<miR-3603>
+UAUGAUAUAGUUAGAGCUGCU<miR-1725>
+UAGCUGCCUAGUGAAGGGC<miR-980>
+UAAGUGAAUAUUCUGUGUCG<miR-785>
+UCUCUCUGUUGUGAAGUCAAA<miR859>
+AGCUAUUGCCAGCGUCAAGCA<miR1102>
+UCACACAACAUUUCUCGUACA<miR3708>
+AUUAAUAAAGAGUGCUAAAGU<miR1917>
+UAGGCAUAGUCUGUUGGUUACU<miR-2153>
+UGCUCGCGUCGAGUGACCGCUC<miR-m107-1-3p>
+CUGGUACAGGCCUGGGGGA<miR-150*>
+UAACUUGAUAGAUAUAUGCAUC<miR-2163-5p>
+UGGAACUAGUAUGGAGCAGGCUGA<miR-1478>
+UUCCCUUUGUCAUCCUUCGCCU<miR-211>
+ACUGGACUUGGAUCAGAAGGC<miR-378>
+CGGUUUUCACCGUGAUCUGAGA<miR-81*>
+AGGUUGCCCAUGGUGUGUUCA<miR-496*>
+UGACAAGCCUGACGAGAGCGU<miR-US5-1>
+CAAAAACCUCAAUUGCUUUUGU<miR-548b>
+UAUGUGGGACGGUAAAC<miR-3563-3p>
+AGCGACGUCGGACCGCGACGGC<miR-M95-1-3p>
+UGAAGAGGACUUGGAACUCGAUC<miR163.1>
+UAUCCAGGGUAGACACUCAGA<miR-3561-3p>
+GCGGACGAACUUAAAGAAGAG<miR-3254>
+AACAUUCAACCUGUCGGUGAGU<miR-181c>
+GGGUCCCGGGGAGGGGGG<miR-4281>
+GAAGUGUGCCGUGGUGUGUCU<miR-595>
+UGCCAAAGGAGAUUUGCCCCG<miR399d,miR399g,miR399a,miR399i>
+UAAAUGCCAGUCGUUGCAGGAGU<miR-357>
+AGCUAUUCAGGAUCUUUCCAU<miR-31b*>
+CAGUGAUGAGUCAAAUACACCA<miR-3325>
+UGGGGAGCUGAGGCUCUGGGGGUG<miR-939>
+UAAGUGUUGCAAAAUAGUCAUU<miR1519>
+AGCUAGCGGGUGUUUUAUUUGGUA<miR-970*>
+UGAUAUCGUCACCCAGCACUGC<miR-1419b-2*>
+CCUGUCCCCGGGCAUUCCGA<miR-4001i-3p>
+UGAGAAAAGGACGGCAGAAAAGCC<miR4393a>
+UGAGCGCCUCGACGACAGAGCCG<miR-339-3p>
+GCUAUUACUUAUAUGUUGCA<miR-4006b-3p>
+UUUGGUUACGGACCCCUUUCU<miR-H20>
+UCUUCACCAUGGUGUUUUUGACAU<miR-3551-5p>
+GCACUGAGAUGGGAGUGGUGUA<miR-674-5p,miR-674>
+CUUUUUGCGGUCUGGGCUUGC<miR-129b-5p,miR-129a-5p,miR-129,miR-129-5p,miR-129*>
+AGGUGGACACGUGGUGCAGUA<miR-1421ag*>
+UAGCACAAUGUGAAAAGAGCUC<miR-3590-3p>
+UAACAGUCUCCAGUCACGGCCA<miR-212-3p,miR-212>
+CAAUACAAAAUGGAGAGACCAG<miR-2574a*,miR-2574b>
+UUGAAGCGUUUGGGGGAACUC<miR395p>
+UUAGAGUUUUCUGGAUACUUA<miR781>
+AUGCAUGGGUGUAUAGUUGAGUGC<miR-669h-5p>
+UCACAACCUGCAUGAAUGAGGAC<miR-67>
+AUGUCAUCCUCCAGCACCACG<miR-1419d*>
+AUUUUGCUCUUACGUUUCACU<miR-2041*>
+GCAGGAGUUUGAUUUCACAU<miR-3480-5p>
+ACGGACUCGCAGGUGUGCAAG<miR913*>
+UCGUGCACAUACAAACAUACAC<miR-2505>
+AAUCUAGCCUCUCCUAGGCUUUGUCUG<miR-282>
+AAAUAUCAGCAGGUAAUUCU<miR-283>
+GAAUGGAGGCUGGUCCAAGA<miR166l*>
+UGGAGACGCGGCCCUGUUGGAA<miR-139>
+ACUUGGUAGAACACGUAGUAAG<miR-2758>
+GUCAUUACUUCCAUGUUUCA<miR-4006a-3-3p>
+UCAGUCAAGAAAGUAUUUUCU<miR-1422p*>
+UAGCUCUGAUACCAAUUGAUA<miR845b,miR845a>
+ACAUACUUCUUUAUAUGCCCAUA<miR-1-1*>
+UGUCUUACUCCCUCAGGCACAU<miR-550a*>
+AAGCUUUCUCAUCUGUGACACU<miR-3095-5p>
+ACUGCAGAGUGAGACCCUGUU<miR-1954>
+UUGUGACCGUUAUAAUGGGCAUU<miR-2001>
+CACUGUUGUGCUGGGUGUACCA<miR4355>
+GAGGAAACCAGCAAGUGUUGAC<miR-3589>
+UAUGACUGAUGUGCGUGUGUCUG<miR-468>
+AAGCAGCGCGUCAUGGUUUUC<miR-15c>
+UAUCACAGCAGUAGUUACCUGA<miR-2944b*>
+AGGACCUGCGGGACAAGAUUCUU<miR-492>
+UCGAGCAGCGGGUCGAUCCGAGC<miR-2518>
+AGCUAAACCGCAGUACUCUAGG<miR-K12-4-5p>
+UCCAUGUGUAAUUCUUCUUGGU<miR-3375*>
+GACUGAUGUUGUUGUUUGCA<miR-2298>
+AAAUGACAGGGGACAUGAGUUU<miR-2489>
+GCAGCUUGUAAACCAGCCCCUCG<miR-3310>
+AAAACCUUCAGAAGGAAAGAA<miR-703>
+GUCACUUCGCUUAAGUUUA<miR-4001a-1-3p>
+CUUGGCACUAGUGGAAUUCUUUG<miR-182>
+CAUGUGCCCAUCUUCACCAUC<miR164b*>
+GCACAGUGCUCUAGGAAAGU<miR-4034-5p>
+UGAGACAGUGUGUCCUCCCUCA<miR-1994b>
+UGUCUCUGCUGGGGUUUCU<miR-593>
+UCAGUGCAUUACAGAACUUUGU<miR-148>
+UCCAUAUCAAUUCGCAGAUGC<miR2080>
+AUAGCCUUGAACGCCGUCGUU<miR4228>
+AUGUUGAUCCUAUUCCCUCU<miR-2488>
+UUUGCUACUUUCACCAAGAUC<miR-4057-3p>
+AUUCUGCAUUUUUAGCAAGCU<miR-544>
+GGUGGCCCGGCCGUGCCUGAGG<miR-663b>
+GUGAGUUUGAAAUUGAAAUGUGUAAA<miR-1006*>
+UAUUGCACUCGUCCCGGCCUGC<miR-92c>
+CUCUACUUUGACAUAGCCCACU<miR1053-3p>
+GGCCGGGGGACGGGCUGGGA<miR2911>
+AACACACCUGUUCAAGGAUUCA<miR-362*,miR-362-3p>
+UAACAGUCUCCAGUCAGGGCC<miR-212>
+UGACUAGAAAGUGCACUCACUU<miR-61>
+AAAAGCUGGGUUGAGAGGGCGA<miR-320a,miR-320>
+UCGUUUUGCAUAGUUGCACU<miR-19a*>
+CAGUGCAAUAAUGAAAGGGCAU<miR-130b>
+GGCAGUGUGGUUAGCUGGUUG<miR-34>
+GGUAUGUUUAGUGUUCAAGA<miR-4009b-5p>
+UGAAAAAGCAAUGGAUAAUAGA<miR-2510>
+UCGCAGGCGACUACUUAUUC<miR-688>
+AUUCAUAGUACUAGAUGUGU<miR1442>
+UGAGUAUUACAUCAGGUACUGA<miR-12>
+AGAGGCUGUAGGUCCCGUGCUUU<miR-1703>
+UAUGUGUGUGUACAUGUACAUA<miR-466a-5p>
+CUCCACAGGCUUUCUUGAACUG<miR396d>
+UUGCAUAGUCACAAAAGUGAUG<miR-153>
+CUGGUUUCACAUGGUGGCUUAG<miR-29b-2*>
+GUGAAGUGUUUGAGGAAACUC<miR395k>
+AUACACACACACAUACACACUA<miR-466i-3p>
+UGCCUGGGUAUCUGGCCCGUGCGU<miR-661>
+UGGAAUUGGUGAUUGGCUG<miR-4170-5p>
+AAUGACACGAUCACUCCCGCUG<miR-425-5p>
+UAGUCACGUGAGGUGAAGUGUG<miR-1421j>
+AGCUGGUGUUGUGAAUCAGGCCG<miR-138a,miR-138>
+GGUAGAUUCUCCUUCUAUGAGU<miR-376a*>
+UCUUAGAUCUACAAUGCCUCU<miR1028c-5p>
+UACUGGCCUCCAAAUUUUCGCU<miR-240>
+AAGAACUUCUUCCGCGAGAUCGCA<miR4365>
+UCCUUAUUAUAUUGCUGUCAAGU<miR-748*>
+UUGACAUCAUCAUACUUGGGAU<miR-1662>
+UGGGAUUAAAGGCAUGCACCAC<miR-1186b>
+UCAUUUUGCGUGCAAUGAUCUG<miR1515>
+UGAGUUGGUAUGUUUCUGGU<miR-4005c-5p>
+GUGCAGUGCUGCAUCUCUUC<miR-1711>
+AGUCAGGCUAGUGGUUAUACUCC<miR-344d-3*>
+GAGCCAAAGAUGACUUGCCGG<miR169h>
+CCAACAGACACAAAACCGACG<miR-3014>
+UCGAAUGUUAUGCAGGCACGUG<miR-4070-5p>
+CGCUGGCGCACUGUUUGACGGU<miR-2839>
+GGAACUUCUACGGUACACCUGC<miR2591>
+GUUGAACAUAAACAUAAUAU<miR-4027-5p>
+UUUGGUGUCAGCUUCCAGCAGC<miR-2548>
+UACCGUACAAGCGGUCCGUCC<miR1165>
+UACCCGUAAUCUUCAUAAUCCGAG<miR-54>
+UCACAUUUAUUAGGAUGUGUGC<miR4232>
+AAACUGGCGACGUGGGACGGUC<miR-1631>
+AGGAGGGCACAUGUGGUACAGU<miR-1421y>
+AGUGUGGCUUUCUUAGAGC<miR-644>
+UCGUGCAUCCCUUUAGAGUGUU<miR-517b>
+CUCAGUAGCCAGUGUAGAUCCU<miR-222*>
+AAACAACAAUAUAACAUUUCAAA<miR2920>
+GUGGGUGUUUGCUUUUUCGGUGAAG<miR-42*>
+AGGGGAGUGCCUGGGAAGCUGU<miR-2382>
+GCAAUGAACACGGCAGUAGAGGU<miR-1564>
+GGGGCAAGAUGGGAUUUU<miR-4116-5p>
+CAUGUUGUGUUUUUGUAGC<miR-4133-3p>
+CGAUUUUUGCUUUCCACUGC<miR-4011a-3p>
+GAGUGGAGAUGUUGAAAUUCAAA<miR-1175>
+UGAAGCGCCUGUUCUUGGAU<miR-3080-5p>
+CACUGUGUCCUUUCUGCGUAG<miR-892,miR-892a>
+UAGGAUGCCUGGAACUUGCCGGU<miR-K12-5>
+UCAUGGAAAAUUGGUUAA<miR-4192-3p>
+UUUGGAAGGUGAUUGUUUGCU<miR3445.1>
+UGACUAGAACCUUGGCUCAGC<miR-61>
+AGCGAUGGCCGAAUCUGCUUCC<miR-1899>
+UGGCUUUUAACUUUGAUGGC<miR-3119>
+AGAGCUGAGACUAGAAAGCCCA<miR-3160>
+UUUGGUGUGGGAGUCCUACCCCUUU<miR-M1-12>
+UGAAACUUGCAAGAACGGGC<miR-4000d-5p>
+AGGCGACUCGGCUGCCUGCAG<miR-2960>
+UACUGGCCUCUCAAUCCUUAUC<miR-240>
+AAUUGACAGUAUUAUGCCAGA<miR3435>
+UGAGAACCAUGUCUGCUCUGAG<miR-589>
+GGGGAAAGCGAGUAGGGACAUUU<miR-3153>
+GCCGCGAUCAGCUGCACCAGC<miR-2185*>
+CGCCAGUAUCGGGUGGGUGA<miR-1391*>
+UGACUAGAGACACAUUCAGCU<miR-44,miR-45>
+UCUGAGGAUUUUUUUUGUGGUC<miR3448>
+AGAUAUGUUUGAUAUUCUUGGUUGU<miR-190>
+UAGAGCAUCACCAAGGGGCAAG<miR-1722*>
+CAGCAGCAAUUCAUGUUUUGAA<miR-424>
+AGAUCAGAAGGUGACUGUGGCU<miR-383>
+UCACAACCUCCUUGAGUGAGCGA<miR-307>
+CCAAUAUUGGCUGUGCUGCUCC<miR-195*>
+AUGCACAGGCUCAAUGCACACA<miR-2207*>
+UGAACACAGCUGGUGGUAUCUUCU<miR-317>
+ACUGCUUAUGAGCUUGCACUCC<miR-3105-3p>
+GAAGCUCGUUUCUACAGGUAUCU<miR-993>
+UUACCGAUUCCACCCAUUCCUA<miR2118>
+UGAGAUGAAGAUAUGGGUGAU<miR774b>
+AGCGAGGUAUAGAGUUCCUAC<miR-276*>
+UAAAUCCCAUGGUGCCUUCUCCU<miR-605>
+CACCCAAAUCUUCCUCUCAGG<miR774b*>
+AAAGUGCUGUUCGUGCAGGUAG<miR-93a,miR-93>
+GAGCUGCCCAGUGAAGGGCUUU<miR-745>
+UCUGUUGUUCCGUAGUGUUCUC<miR-M6-5p>
+UGUGAUAUCAUGGUUCCUGGGA<miR-3689a-5p,miR-3689b>
+UAGGUUAUCUGACUUAUCUCACAU<miR-2571>
+UAGAUAAAAUAUUGGUACCUG<miR-577>
+UCACUAGUGCUGGCACCUAAGA<miR-rL1-23-5p>
+GUGAGGACUCGGGAGGUGGAGGGU<miR-1224-5p>
+UGACCGAUUUCUCUUGGUGUU<miR-29a-2*>
+UUUGUUCGUUCGGCUCGCGUGA<miR-375>
+UGACUAGAUCUACCACAGCAA<miR-3365>
+GGAAUGGAUGGUUAGGAGAG<miR3633a>
+UGUGUUAGAAUAGGGGCAAUAA<miR-3152>
+CCGAGUGCUCCCGCGAGCGCU<miR-2901>
+UGAGCCGCGCCAAUAUCACAU<miR171d,miR171a>
+UGAGUUGGUGCUAUCAUACU<miR-4005a-5p>
+GUGGAUAUUCCUUCUAUGGUUA<miR-376b-5p,miR-376b*>
+CUCCUACCUGUUAGCAUUAAC<miR-155*>
+ACUGACUGCUCAGAGGGAUUGG<miR-1738>
+CGUGGCGGGAAGGGAUGGGCG<miR-1579>
+UUGCACUUGUCUCAGUGA<miR-4325>
+CUGGAAAACUAUGUUUUGUGUG<miR-1422o>
+UCAGUCUUGUCGAAUGGUG<miR-2766>
+UUACUGGACAUUGUAAGAACGG<miR-3015a>
+UGACUAGAUCCACACUCAUCCA<miR-279,miR-279b>
+UUUAACAUGGAGGUGCUUUCU<miR-302*>
+UAACGGACAACCGUCUAUAUUG<miR-2537*>
+UCCCCCGGUGUGAUAGCUCC<miR-2724>
+AGAUCGAAGGUUCCUGGCUUAC<miR-964*>
+UUGGAGGCUGCAGUGUCAUGGU<miR-3532>
+GCAGUUCGCGAUAAGCGGCCG<miR-3055>
+UGAUAUGUUUGAUAUUUGGUUGU<miR-190>
+AGGGCAGGCAUAGCUAAGUG<miR-2206-5p>
+ACCUAGCCUCUCCUUGGCUUUGUCUGU<miR-282>
+GUUCCCUUAAACGCUUCAUUG<miR395h*>
+CGGGUGGAUCACGAUGCAAAUU<miR-363>
+CCAGUGCUGGAGAUGUCAUCA<miR-1419d>
+UGCGACGCAUCGGCCUUUCUUC<miR-1634>
+CCACCGGGUAGACAUUCAUUCGC<miR-36-3p>
+GACGUCGCCUUUGGGGCUUGAAGAA<miR-3284>
+AAAGAAGUACAAGUGGUAGGG<miR-2023>
+UAAUACUGCCUGGUAAUGAUGC<miR-200c>
+UCAGGGAUUCUCAGGGAUGGAA<miR-1546>
+AUGACCUAUGAUUUGACAGACA<miR-215>
+AGAUCAGAAGGUGAUUGUGGCU<miR-383>
+CAAUCAGAACAUGACACAUGACAA<miR1520f>
+UGUCACCCUAAGACUGCUCUAAU<miR-1722>
+UCACUGGUCUUUCUCUGACGAA<miR-359>
+AAUCAAAACCUAAAGAAAAUA<miR-737>
+AAAGUGCUUCCACUUUGUGUGCC<miR-291a-3p>
+ACAGCUUUCUCUCGCACAUCGUC<miR-2219*>
+CGCGGUAUAUUCUUGUGGCUUG<miR-308>
+UUUGAGAGUCCUAGCUAG<miR-2744>
+UAGGUCUGUCUACACAGCAA<miR-4092-3p>
+CGGAACUUUCCAAGGAACAG<miR-4001c-5p>
+UGCAAAUCCAGUCAAAAGUUA<miR2949a*>
+GUUUGUGAUAUUCGGCCUAAGA<miR-2699>
+UGGACCCUCGCAUGUCCGUGA<miR1156.1>
+CCUCUUCCCCUUGUCUCUCCA<miR-1236>
+AACCCUGUAGAUCCGAAUUUGUG<miR-10>
+UGUGGUUUUUUGUUUUCCUUU<miR-2437>
+CGAAAACAGCAAUUACCUUUGC<miR-570>
+AGGGGACCAAAGAGAUAUAUAG<miR-3144-5p>
+GUGCAACGAUCAGUGGCAUGC<miR-64*>
+AGCGGGGCGGCUGUGAGCUGAGCU<miR-1716>
+GGUGGAAGGCAGGGGGGUGUA<miR-H6-5p>
+UGAGAUAUUCACGUUGUCUAA<miR-977>
+UCGGGGUGGGAGGAAGGUUCU<miR-2295>
+GGGCGCAGUGGUUUAUCGAUC<miR162*>
+CGUGAUCUCUUAGUGGCAUCAC<miR-263a*>
+AACACUGUCUGGUAAAGAUGC<miR-141>
+AGAAUUCAUAGCAAUACGGACU<miR-1619>
+UAGCCAAGGAGACUGCCUAUG<miR169d>
+UCACAACCUGCAUGAAUGAGGU<miR-67>
+UGGUGUGCACGGGAUGGAAUA<miR2950*>
+AGCGCGGGCUGAGCGCUGCCAGUC<miR-2277-5p>
+UGCCCUGUGGACUCAGUUCUGG<miR-146b-3p>
+AAAUUCGGUUCUAGAGAGGUUU<miR-10*>
+GAGCUCUCUUCAGUCCACUC<miR319c*,miR319a*>
+UUAAUGCUAAUCGUGAUAGGG<miR-155>
+UAGCAGCGGGAACAGUUCUGCAG<miR-503>
+UUGUAGAGUCAUACACCUCCA<miR1223a>
+AGAAGAGAGAGAGCACAACCC<miR529>
+GGAGCGGGUGCAGGACCCCGG<miR-2302>
+UGGUUGAGCCGCGCCAAUAUC<miR171h>
+AACAGCAGUCGAUGGGCUGUCU<miR-21*>
+AACCCGUAGAACUGAAAUCGUG<miR-100c>
+UUCGUUGUCGACGAAACCUGC<miR-981>
+UCCUCGCCAUGCCACCGCCGCUUCA<miR-3332>
+GAAAGCGCUUCCCUUUGCUGGA<miR-518a,miR-518a-3p>
+UGUCUACACUCAUGUUCUAGA<miR1048-3p>
+UCCCAGGGAUUCUCAGUAGAUU<miR-2240b>
+AGGUUCUGUGAUACACUCCGACU<miR-152*>
+UGGAUCUUUUCGUGCCAUCGU<miR-263b*>
+UGCAUUGCGUGCGACGUCCCUA<miR-1421m*>
+UAAUGCCCUUUGAAAUCCUAAA<miR-365>
+ACCUGGACCCAGCGUAGACAAAG<miR-3690>
+UCAGCUGUAGUUGACGACAAAU<miR-3008>
+AAUGGAUUUUUGGAGCAGG<miR-1246>
+CCACUGCCCCAGGUGCUGCUGG<miR-324-3p>
+UCUUUGGUCAUCUGGCUUUGUGA<miR-79-5p>
+UGAGCUUUCGUCUUAUGAUUG<miR-4100-5p>
+CCAAAACUGCAGUUACUUUUGC<miR-548o>
+UGGUGAAAUUUGUAGAUUGGA<miR1854-5p>
+CAUCUUACUGGGCAGCAUUGG<miR-200b*>
+AGCCGCGGGGAUCGCCGAGGG<miR-3648>
+CUGCACUGCAUCUUCCCUGUGC<miR408>
+AAGUGGAGGUGUGAUCUCUUCA<miR-1175-5p>
+UGGAUCUUUGCAUCAUAACCC<miR1056>
+UGGGUGGCAAACAAAGACGAC<miR851-3p>
+GUGUGCUUUGUGACAAUGAGA<miR-988*>
+AGAGGUUUUCUGGGUUUCUGUUU<miR-329a,miR-329b>
+UAUGAUUGGUGUUUGUGAAAAGU<miR-3276>
+AACCUGCCCCCCAGCUUUGGAC<miR-634>
+UAUUGAUCUCCAAUGCCUAGC<miR-1542>
+AGUCCUUCCCGGGUCCCCUAGA<miR-M17*>
+UGAAACUUGCAAGGAACAGG<miR-4000i-5p>
+UGAGAAAGUUCCACGAUGUGCAUG<miR-2787>
+AACACACCCAGCUAACCUUUUU<miR-329>
+GUAAAUGGCACUGGAAGAAUUCAC<miR-263>
+AGCUACAGUUACUUUUGCACCA<miR-548v>
+AUUUAGGUGCCAGAGAGAGA<miR-1406>
+UGUGGGAGAGUUGGGCAAGAAU<miR2948-5p>
+UUUGGCACUUGCACAAUAUU<miR-96-5p>
+AUCUGGAAGCUAGGUUUUCUCU<miR1860-3p>
+UGAGUAUUCCAGAUUGCAUAGC<miR-960>
+AGCUUCUUUACAGUGUUGCCUUGU<miR-107*>
+UACCAUAAAUAGAGUGCCGUAUU<miR-2031*>
+UAACGCAUAAUAUGGACAUGU<miR-3912>
+UAUGGUCUGAAGUUGCUUUACA<miR-2513b>
+GGCAUCCACGUGUGCUUCACCG<miR2589>
+CAUCAACAGGCAUUUACUUCAA<miR-987*>
+AUACACGUGCACGGAUAACGCUCA<miR-248>
+AAUGCGCUUCCCUUUAGAGGG<miR-523a>
+UGCUGUCCUUUGUAUUAGGAGA<miR-1340>
+AAUGCACCUGGGCAAGGGUUCA<miR-500>
+UUGGGAACGGGGUGUCUUUGGGA<miR-3100-5p>
+UGGAGGUGUCGUUGCCAAGGA<miR1093>
+AGCUAGUUCGGCGAUGUCGCUCU<miR-3395>
+CAUGACAUUUAGUGAUGAUGU<miR2646a,miR2646b>
+UAUGGCACUGGUAGAAUUCACUG<miR-183>
+AAGGAGCUGACUGGGAAAA<miR-1407>
+AUGAGUUGGGUCUAACCCAUAACU<miR405b,miR405a,miR405d>
+UAAAAGUGCUGCUGGUGGAAGAA<miR-1643>
+GGCAGAUGAUUGAAAACUGAG<miR-1766>
+AACUUAAAUAUGUUUUCAGUCC<miR2650>
+UGACUACGCUCAGUGGAAUACC<miR-64a*>
+CGCCUGGCUCCCUGUAUGCCA<miR160i,miR160b>
+GAAGGCGCUUCCCUUUAGAGCG<miR-525-3p,miR-525>
+GUAGUUUUCUUUGUCGUUUU<miR-2482>
+CAUUGCACUGUUAUUGAUCU<miR-4038-3p>
+CCCCAAAUGUAGACAAAGCA<miR158b>
+AACGUCGGGAUUUAGGGUGUU<miR2626>
+AACAGAGCAUGCCGUUGGUU<miR952a>
+AAAAGUUGGUUCGGGUUUUU<miR-2284l>
+CCGAGCCCAUCCCUGCCCUAG<miR-3550>
+AGGCGGAGACACGGGCAAUUGC<miR-25*>
+UGAGGUAGUAGGUUGUAUGGUU<let-7c>
+UGGAUUUCAGUAGCAUCCACU<miR-3493>
+CAACUGAAGUCGGUGUUUACU<miR2092-5p>
+GAAGAUUUAAUAAGAUUGGGG<miR-2708>
+UGAUGGUCGUCCUCCGAAAGG<miR3466*>
+CUUGGCACUGGAAGAAUUCACAGA<miR-263b>
+UCACGCUGCUGUGAACAUGAU<miR2653a,miR2653c,miR2653b>
+UGAGAUCAUUAGUUGAAAGCCG<miR-80>
+AAGUCAUCAACAACAAAGUUG<miR821d>
+UAGCACCAUAUAAAUUCAGUAU<miR-83>
+UUCACAACGAGGUGUCAUUUAU<miR-513d>
+UAGGAACUGGAAGAAGAGGAGG<miR-2840>
+UGGGUUCCUGGCAUGCUGAUUU<miR-23b*>
+UGAGUUACAUGGUCAGGGGAUU<miR-M11-3p>
+UAUUGGCGCGCCUCAAUCCGA<miR171m*>
+AACAUCACUGCAAGUCUGUGCU<miR-499*>
+UAUUGCUUGAGAAUACACGUCG<miR-137>
+AGAUCAUUAUUCAAGCUCUCU<miR-753d-3p>
+UACUGGCCUACUAAGUCCCAAC<miR-193,miR-193*>
+AUGAGUUUCAUCAAAUCAUGU<miR2642>
+CAAUUGGUAUCCUUAGUCGUGG<miR-358>
+UCUUCGCGGGUACUGUCGGGAC<miR-1945>
+AAAAGUAAUUGCGAGUUUUACC<miR-548a-5p>
+UUGAAAUUUUUUCUAUUUUCGGU<miR-792>
+UGUCAUGGACUUGCUCUCUUUG<miR-281>
+UCUCAUCUAAGCCCGACGUUUUAGA<miR-3221>
+UAAUUGAACCGCACUAAUAUC<miR171c>
+UGAGAUCACUUUGAAAGCUGAUU<bantam>
+CUGGGAGGUGUGAUAUCGUGGU<miR-3689a-3p>
+UCAGGUAGAAUUUAGAGGAGAAA<miR-2211>
+UGACUGGCACCAUUCUGGAUAAU<miR-871-3p>
+UGGUUUGCCUGGGACUGAG<miR-584>
+ACCAUUCUGUGUUUCGAAUG<miR-4055-3p>
+UAUGCUGAUGAACAAAGGCUUG<miR-4068-3p>
+GCGGAGCGGAGCGGAGCGGGG<miR-2976>
+CAUGACACUCAAGCAUACCAUGG<miR-64b>
+CAAAUCUUAUUUGAGCACCUGU<miR-1264-3p>
+AAGAAGACGACAUUUUGUUG<miR2928>
+AGGUAGUCCCUGGUGCCCUAAGG<miR-K12-5*>
+ACUGUAAACGCUUUCUGAUG<miR-3607-3p>
+UCUCCACAGGCUUUCUUGAACU<miR396f>
+AAUCGAUGUAGAAAAGUGAUUGGU<miR4385>
+UCCAUUACACUACCCUGCCUCU<miR-885,miR-885-5p>
+UGAGAUCAUUGUGAAAGCUAU<bantam>
+AGGUCAAGGUUCACAGGGGAUC<miR-1898>
+CAGUUAUCACAGUGCUGAUGCU<miR-101*>
+UAUUGCACAUGUCCCGGCCAAU<miR-92a>
+GCGACCCAAUCUUGGUUUCCA<miR-551a>
+UGAGGUAGUAGGUUAUAUAGUU<let-7>
+UGGUCUGACUUCGCUAUAGAGAAUG<miR-3013>
+AGAAUAUUGGUACUGGGCAAAA<miR-2024f*>
+UCAGCUGGCCCUCAUUUC<miR-1207-3p,miR-1207>
+UGGAACUUACUAAUGAACAG<miR-4001f-5p>
+CCUGAUCGCAUUUUAAAAGGC<miR2615a,miR2615c,miR2615b>
+CAGCCAUUCUGCGAUUCUGUGA<miR-3525>
+AGGGACGGGACGCGGUGCAGUG<miR-92b*>
+UAAGGUGCAUCUAGUGCAGAUA<miR-18a,miR-18>
+AGUACACGGGGUAUGGGUAGU<miR-2017*>
+UCAGUUAUCACAGUGCUGAUGC<miR-101*,miR-101a*>
+UUGAUUCCCAAUCCAAGCAAG<miR832-3p>
+UUGUAGAGUCAUGCACCUCUA<miR1223j>
+ACGAAGAUCUGCAUCAUAAC<miR902f-3p>
+UGACGGGUCGUGAUGGGCACU<miR1033a,miR1033e,miR1033b,miR1033c,miR1033d>
+GAGCUUAUCCAUAAAAGUACAG<miR-590*>
+CCUAGUAGGUGUUCAGUAAGUGU<miR-325>
+AGGUGGUCACAUGAGUUGCAGU<miR-1421n>
+UGGCGCUUAUGUGUAGAACCGG<miR-2160>
+UCCCCCAGGCGUGAUUCUGAUUU<miR-361-3p>
+UGACUAGACCGAACACUCGUGCU<miR-286>
+UAAAGAGCCCUGUGGAGACA<miR-1276>
+UGGGUUCCUGGCAUGAUGAUU<miR-23*>
+UGCACACUUGCGAGUCCGUGG<miR913>
+AAACAAACAAACAGACCAAAUU<miR-1192>
+UUCCAUGUUGAUCGGGGCUGCUUC<miR-3378>
+CAGACAGCUGCGUGUCGUAA<miR-4130-3p>
+AAAAAGUUUAUUCGGGUUUUU<miR-2284n>
+UAUCUUUUGCGGGGGAAUUUCCA<miR-rL1-2>
+CUAGGAGGCCUUGGCC<miR-4266>
+CGGGGGUGGCGGGGAGGGGG<miR-2305>
+UAUCACAGCCACUUUGAUGUG<miR-13a>
+UUAGCGGUGGACCGCCCUGCG<miR-4321>
+CCAAAUAGUUGGGAUCGUGGA<miR-2358>
+UGGAAGAAUUUCUAGGUACACU<miR-M1-5p>
+UGAUUGUCACCUUUUUGAGUAGA<miR-508>
+CUUGAGAGAGAGAACACAGACG<miR2936>
+UAUUGUAUUUUUGCGCCAGCGGG<miR-B8-3p>
+UCCAACAGCUUAGAUUCGUCC<miR2862>
+ACAUGGUCGGUAUCCCUGGAA<miR1510b>
+UCGCACAUCAGGCUGAACGAC<miR-rL1-14-3p>
+CCGAGCCCCAGCCAUGUCCGAGU<miR-1351>
+AAAGAGGAAACUGAAGCUGAAA<miR-1630>
+UAGGGGGCAGGAGCCGGAGCCCUCU<miR-3104-5p>
+UAGAUUGGGCUUGGUCGGCAGA<miR-2016>
+GGCCAAAAAGUUCGUUCGGA<miR-2284q>
+CCUUUGCCUUCAUCUUCUGCAACUU<miR-3242>
+UCUUUUGAACUGGAUUUGCCGA<miR2949b,miR2949c>
+UAUCACAGCCAGCUUUGUUGAGC<miR-2a>
+UGAGUUGGCCAUCUGAGCGAG<miR-571>
+ACAACCCUAGGAGAGGGUGCCAUUCA<miR-652>
+AUUGCACGGUAUCCAUCUGCG<miR-363>
+AUUGACACUUUUGUGAGUAG<miR-514>
+AGGGUGUUUCUCUCAUCUCU<miR-609>
+CUAUACAGCCUACUGCCUUC<let-7b*>
+GGCGGAGGGAAGUAGGUCCGUUGG<miR-658>
+UAAGUUAAGAACCUCCGCUCUA<miR-964>
+AGAAUAUUGUGUCUUGUAAACUU<miR-2800>
+UCUCCCAACCCUUGUACCAGAG<miR-150>
+UGACAUCAUGUGCGCGUGCUGCU<miR-3271>
+GCGAUAGCUCAGGAACACUGCAG<miR-1792>
+ACUGGAGGUCUCUGUCUGGCUU<miR-1843>
+UGAAGCUGCCAGCAUGAUCUG<miR167d,miR167j,miR167e,miR167g,miR167f,miR167h,miR167b,miR167i,miR167c,miR167,miR167a>
+AUUGGAGCUGAGAUUCUGCGGGAU<miR-3057-5p>
+UCAUUCGAAAUUUUGCUCAAAUCC<miR-87b-5p>
+GGAGAGGCAUUGUCCCCUGGA<miR-1773>
+CGGGGCGGCAGGGGCCUC<miR-3196>
+AAAAACGUCAAAACACGGUGG<miR-3039>
+UCCUGCACCGCUGAAGUCAAU<miR-1677*>
+GAUCAUAGCCAGUGUCCAGGGA<miR-rL1-13>
+AGCUUCUUUACAGUGUUGCCUUG<miR-107*>
+UGUGCAUGUGUGUAUAGUUGUGUGC<miR-669k*>
+GCUAGUCCUACUCAGCCGGU<miR-554>
+GCAGCAGAGAAUGAGACUACGUC<miR-922>
+CAUGGCACUGCUGAAGGUUCG<miR-2253a>
+AAAGUGCUUUCUGUUUUGGGCG<miR-427>
+UCCCUGAGGUUGAUUACUCACU<miR-2236b>
+ACAUAACAUACACACACAUGUAU<miR-669a-3-3p>
+AGUGUGAGCAGGUGCAGAGCUG<miR-1601>
+CGUGGGGGCCGGGUGCUCACCG<miR-1909>
+AUUGGUAUCCCUGUCAAGGUC<miR-358>
+UUAUACCAUCUUGCGAGACUGA<miR3510>
+CUUCACCUGGUCCACUAGCCGU<miR-412>
+GAAAGACACCAUACUGAAUAGA<miR-743b>
+AGAUUCGAUUCUAGGGGAAU<miR-10b*>
+AGCAUUCAAACAUUCCCAAUUACC<miR1853-5p>
+CCAGCUGGGAGGAACCAGUGGC<miR-763>
+UUCAUUUUUAAAAUAGACAUU<miR1514b>
+UGUCCUCUUCUCCCUCCUCCCA<miR-877*>
+GUUCUAUGCAAGCACUUCACGA<miR395g*,miR395d*>
+UCAAAUGAUUUUGUGUCGUUGG<miR4350>
+UGCAGGCUGGAAGUAGGAGUGU<miR-1556>
+UAGAUUGUAGGCCCAUUGGA<miR-3086-5p>
+AGCUAUGUCCAUCCGCCAUCCG<miR-2697>
+CAGGCUGGGGUGUGUGUGGAUG<miR-664>
+UUUGUUCGUUCGGCUCGAGUUA<miR-375>
+UGGAUCUACUGUGAAGGACUGAG<miR-3422>
+GCUGCCUAUACAUGGGCUUUCC<miR-3106*>
+UCCCUGAGACCUUCGACUGUGU<lin-4-5p>
+ACUUGAGGGGCAUGAGGAU<miR-327>
+AGAAGUCAGCAACUUGAUUCCAGCAAUUG<miR-284>
+AGGGAUCGCGGGCGGUCGGCGGCCC<miR-638>
+AAGUGCUGUCAUUGCUGAGAUC<miR-512-3p>
+UAGUCUAGUGUACAGUUCAUGG<miR-2693>
+UCAAGCACCAGCUCGAAGAAGC<miR825*>
+UGAACGCAAAUGAACAUGUUC<miR1040>
+UGGCAAGAAAUGGCAGUCCAG<miR-74a>
+UCACCGGGAGACAACCUGGUAU<miR-38>
+UCAGCACCAGGAUAUUGUUGGGGA<miR-3065-3p>
+CACGCGGGAACCGAGUCCACC<miR-700>
+GAGCUCAGGAGGGAUAGCGCC<miR390c>
+UAUCACAGCAAUCACAAUGAGAAGA<miR-797>
+CAACUAGACUGUGAGCUUCUAGA<miR-708-3p>
+AAGUUGGCUGUGAUUUGGCU<miR-4077d-5p>
+GUGUAUGAUGAAUUAUCUGACC<miR-2318>
+ACCAAAGUAGCAGACGUAUCGAC<miR-50*>
+GGUAGAGUUUGACAGGCAAGCA<miR-H4>
+UCACCUUCCCUGCAGCCACU<miR-1393>
+CUAUCUACUUAAAAUGUGCCU<miR-2216*>
+GGGGGCAGGGCCUUUGUGAAGGCG<miR-326*>
+AAAGUGCAUCUUUUUAGAGGAU<miR-519c-3p,miR-519c>
+ACGCACUGUCCUGGGAAGUGG<miR-2456>
+CUGGGACUGUGCGGUUGGGAC<miR-H3>
+UGCCCUCCUUUCUUCCCUC<miR-4290>
+CACAUAUGAUGAGUACUGAUG<miR-1622>
+GUAAGUGUGCCUCGGGUGAGCAUG<miR-668*>
+AUUUGUGUGUGGAUGUGUGU<miR-669n>
+UGAGGUAGUAGGUUAUAUCAGU<let-7a,let-7c>
+UGAGGUAGUAGGUUAUGCAGU<let-7a>
+AAACAUCCGGACUAAGUUUAU<miR-2204-3p>
+ACGUCGUCGUUCCCACCUGG<miR-4140-5p>
+UUGCGACAUACUUAUACUAAA<miR-1302c>
+UCUGCAAGUGUCAGAGGCGAGG<miR-2276>
+UUGUGACCGUUAUAAUGGGCAU<miR-2001>
+CAUUGCACUUGUCUCGGUCUGA<miR-25>
+UCCCAGAGUGUUGAGUUCAUACAA<miR-2045>
+UUGAAGAGGACUUGGAACUUCGAU<miR163>
+UAGGAACUUAAUACCGUGCUCU<miR-276b>
+UGGUGUUGUCCCCCCGAGUGGC<miR-K12-10b>
+UGAGUUGGUGCUAUCAUGCU<miR-4005b-5p>
+ACUGCCCUAAGUGCUCCUUCUG<miR-18a*>
+CCACUGCCCCAGGUGCUGCU<miR-324-3p>
+CAUACUUCCUUACAUGCCCAU<miR-1*>
+UGGCCCAAAAGUUUGUUCGGAU<miR-2284s>
+UCGUGUCUUGUGUUGCAGCCA<miR-187>
+GUCUGGGCCGUGGAGCGUUU<miR-2751>
+UAUACGGUUCGGAAUCCUCUAA<miR-2563*>
+AUCUCUUUGAGCGCCUCACUC<miR-692>
+UUUUUCCCUUACGGUGCCUGACG<miR-M24*>
+AGUGAGGAGGCCGGGGCCGCU<miR1846a-5p,miR1846c-5p,miR1846b-5p>
+UGGACGUUGGCUCUGGUGGUGAU<miR-1306>
+CCCAUCUUCUGCCCUUCCAUCCU<miR-H6*>
+GAAGGAACUCCCGGUGUGAUAUA<miR-2944b>
+UUUGGGAAUCUCUCUGAUGCAC<miR3630*>
+UGUGAUGUGACGUAGUGGAACA<miR-989>
+AAAGUGCCGCCAGGUUUUGAGUGU<miR-292-3p>
+UGUUUCAGCUCAGUAGGCAC<miR-3074-2-3p>
+UAUUGCACUUGUCCCGGCCUUU<miR-92a>
+UUUUGCGAUGUGUUCCUAAUGU<miR-450a>
+UCUGAUUUUCGAAGUCCCAAAA<miR3439>
+CCCGCCCGCCGGACGCCGGGACC<miR-H18>
+UCGGACCAGGCUUCAUUCCU<miR166c,miR166k>
+AUUAUUCUGUGACACUUUCAG<miR-1020>
+AUGGUGGAAGAACAAGGCCUGC<miR-3540>
+UUUGGGUGACGCUGCGCUGAUAUU<miR-3367>
+AGGUGGAUGCAAUGUGACCUCA<miR-3165>
+UCCAAAGGGAUCGCAUUGAUCU<miR393a,miR393b,miR393c,miR393>
+UUCCUAAUGCUUCCCAUUCCUA<miR2118l>
+UGUGUUCUCAGGUCGCCCCUG<miR398c,miR398b>
+UGGACGAAUUGAUUUAGU<miR-4168-3p>
+UAAUACGUGAUUGGUGUUCCCAG<miR-70>
+UAUCACAGCCAUUUUGACGAGUU<miR-13>
+AGAGAAACCCUGUCUCAAAAAA<miR-706>
+ACUCCAUUUGUUUUGAUGAUGG<miR-136>
+UAAUCUCAGUUGGUAAUUCAGA<miR-216a>
+AAAUGAGGGGCAAAAUCUGUGUU<miR-2486*>
+UAAAAACUGCAAUUACUUUCA<miR-548x>
+UGUGCAAAUCCAUGCAAAACUGA<miR-19b>
+AGCAGCAUUGUACAGGGCUAUGA<miR-103,miR-107a>
+GUCAUUAUUUUCAUGCUUCA<miR-4006a-1-3p>
+AGCAGAAGCAGGGCGGUUCUCCCA<miR-298>
+ACCCUUAACUGUCUGUUUAAAAC<miR-4006f-3p>
+GGAUAGGUUGAAUUCAUCGU<miR-4015-3p>
+UUCACAGUGGUUAAGUUCUGC<miR-27c>
+AUAAGUACUAGUGCCGCAGGAG<miR-252>
+CGGUUCGACUCGUUAGGUUC<miR2614>
+CACUUCAUAGUACAACGAAUCU<miR814c,miR814b,miR814a>
+UGUGUGGAUCCUGGAGGAGGCA<miR-3911>
+GUCUUUUUCAACAGGUUUC<miR-4000b-2-3p>
+UGGUAAAUAUCUAGUGCAAGUC<miR-92*>
+UGACCAUGGUGACGAGUCGAGCCC<miR-3342>
+AGAAGGGGUGAAAUUUAAACGU<miR-3179>
+UGAGAUCAUUGUGAAAGCUGAUU<bantam>
+UAAGUGCGUGCAUGUAUAUGUG<miR-467c>
+UGCGUCCAAAAGAUCGUCCUU<miR3458>
+AAGUGCUUCCAUGUUUCAGUGG<miR-302c>
+UCCCUGAGACCCUUUAACCUGU<miR-125a>
+CUCACUGGUCAAUGAAUGCAAA<miR-181b-2*>
+GUGUGCGGAAGUGCUUCUGCUA<miR-147b>
+AUGGUAGCACGGCAAUGAGCAU<miR-1598>
+UAGUCACUUGGGAGACGUCCUGG<miR-3245>
+UCCAACUUGAGGCCCGAUUGA<miR817>
+UCCCAGGGAUUCUCAGUGGAUU<miR-2240c>
+GUGGAUAUUCCUUCUAUGUUUA<miR-376c,miR-376c*>
+UCAUUGUUAAAGUCUGUAGUCUA<miR-3299>
+AGUGGAUGAUGGAGACUCGGUAC<miR-3691>
+UAAGCUCGUGAUCAACAGGCAGAA<miR-231>
+CACCCUGUAGAAUCGAAUUUGU<miR-10c>
+AUCGGGCCCUCGGCGCCGG<miR-3181>
+AGAAUCCUGAUGAUGCUGCAG<miR172d,miR172>
+UAAUACUGCCGGGUAAUGAUGG<miR-200c>
+GCAUGACACCAUACUGGGUAGA<miR-878>
+UUGAAGAAUUGCAGGUGGUAGGU<miR-1497g,miR-1497>
+ACAAGCUUGUGUCUAUAGGUAU<miR-100*>
+ACGAAGGCUUAAUGAUUAUCAU<miR-2203*>
+CUGAAGCUCAGAGGGCUCUGAUU<miR-127*>
+UAAGGUGCAUCUAGUGCUGUUAG<miR-18b>
+AUCUCUACGGGUAAGUGUGUGA<miR-1461>
+ACAUCAUUUCAACUGCCUCGGC<miR-84*>
+CGUGGGACAGCAUAGAAUGCG<miR1212>
+UCCUCGAACUGUUGUGGCCA<miR-3487>
+GUGAGUUUGUUGUAUUGUGGU<miR-4004-5p>
+UCCGAAACAUUCCCAGCCUUUA<miR-3083*>
+CCAGGAGGCUGGGAUCGAAGGC<miR-H16>
+UUAGGACAAAGUGCGAACGC<miR-H11>
+AAAGUUGAGUCGAUAAUGCGAU<miR-2583>
+UGCUCAUUGCAUGGGCUAUGU<miR-1912-5p>
+UCUCUCGGCUCCUCGCGGCUC<miR-3615>
+AACGUGACACGUGACGGUCAACAU<miR1520i>
+AUCUGACCUGAUGAAGGU<miR-4256>
+UAAGAGGACGCAGGCAUACAAG<miR-BART17-5p>
+CAUAAACUAUAUUUAACCACUAU<miR-3644*>
+GGGCGCCUGUGAUCCCAAC<miR-566>
+GUGAAUUUCCCGAUGCCUUAG<miR-263b*>
+UAGGUCACCCGUUUUACUAUCC<miR-1193-3p>
+UCGGACCAGGCUCCAUUCCUU<miR166p>
+ACCGUGGCAUUAGAUUGUUACU<miR-132*>
+AACAGGUUAAAUGUGGUGCAGU<miR-1421t>
+CCCCUUGUUGCAAACCUCACGC<miR-988>
+CACAUUAUUCAAAACAUUGAAUCAC<miR-1c*>
+AUCAGUUUCUUGUUCGUUUCA<miR837-5p>
+CGCGAGAUCGCACGGAAGAAGGUU<miR4364a>
+UCGGCCUGACCACCCACCCCAC<miR-1234>
+AAUGCUGUAAAAUAAAGGCA<miR-4062-3p>
+ACAACAUUUACAAUGUUUGCAG<miR-2497>
+AGUUUUGCAUAGUUGCACUACA<miR-19a*>
+ACCCGUCCCGUUCGUCCCCGGA<miR-1247>
+CUUCUUGUGCUCUGGGAUUGU<miR-578>
+AUAGCUCUUUAAAUGGUUCUGC<miR-458>
+UCACUGCCGGCCCGAUCCCGCCGU<miR-2531>
+AGGACUGUCUAACCUGAGAAUG<miR-1388*>
+UGAGAAGAUGCGGUCCGUUGGC<miR908.1>
+GCUGACCCCUAGUCCAGUGCUU<miR-345-5p>
+CGGCGGCAGCGCCGGGGCG<miR-2885>
+CUGAAAGUGUCCAUUUCCGUU<miR-2757*>
+CUGAAGAGUCUGGAGGAACUC<miR395n>
+GGAGACCUCUGGGUUCUGAGCU<miR-769-5p>
+CCCCUCAGUCCACCAGAGCCCG<miR-760>
+CAGCGAAUCGCUCGGCCCACUUU<miR-1832b*>
+GCUGGUUUCAUAUGGUGGUUUA<miR-29b-1*>
+CAGGGAGCAGACCAGUCCAGU<miR-1338*>
+UGCCCUAGGGACUCAGUUCUGG<miR-146b-3p>
+UAAUCUCAGCUGGUAAUUCUGAG<miR-216a>
+GUUUUGUUUGGGUUUUUUUC<miR-2325a>
+AAAAGUAAUCGCGGUUUUUGUC<miR-548h>
+GAAUCCACCACGAACAACUUC<miR-3578>
+ACCCACCUCUGUAGUAUACA<miR-4163-3p>
+UCCUCAUUGUACAUGCUGUGUG<miR-460b-5p>
+CCACUUGGAUCUGAAGGCUGCCC<miR-3614-5p>
+GAAACAACAUACGUUACAUCC<miR822*>
+CUUGGACUGAAGGGAGCUCC<miR319b,miR319,miR319a>
+AAAGUGCUAUCAAAUUGGGGUA<miR-430j>
+GGGGGCGGUGGGGGGCGGGG<miR-1777b>
+UGCAUCAUAUGUGACCUCUCUGC<miR-1421y-2*>
+UAAUAUCGGGACUAGACGAC<miR-2834>
+AGAUGUAGUUGGUGUAAA<miR-4152-5p>
+AGCCGGGCAGUGGUGGCACACACUUUU<miR-1946a>
+CACACCGCCUCUGCCCGCUAGU<miR-3594-3p>
+AUCACAUUGCCAGGGAUUACC<miR-23,miR-23b>
+CUAAGCACAGCUCUCGCAUCC<miR3628>
+AGGAGGGAGGGGAUGGGCCAAGUUC<miR-1249*>
+GAUGUGUGUGUACAUGUACAUA<miR-466e-5p>
+AGGUUGUCCGUGGUGAGUUCGCA<miR-323b-5p,miR-453>
+AGUGAGAUUGUUGCAUAUUUACA<miR-2162-5p>
+UGGUGGAGAUGCCGGGGA<miR-2898>
+AAACAUGGUUCCGUCAAGCACC<miR-218-1*>
+UAUGCAUAUACACGCAUGCAA<miR-669k>
+UGGCUGGAGUGCGGCGGAGGU<miR-2428>
+CCAGAUCUAACUCUUCCAGCUCA<miR-750>
+AAGCUAGCCUCUAACUCAUGGC<miR-1198-3p>
+GCUAAUGCAAAAAAUGUCAGU<miR-2034>
+UGUCAUGGAGUUGCUCUCUCAUU<miR-281>
+CAACUGAAGAUCUACCAGGAC<miR3465*>
+UGUGGAUAGAGAAGGGUUAGU<miR946a*>
+GUGCGUGUGUGAGAGGCCAUCGUA<miR-2496*>
+UGAGAACUGAAUUCCAUGGGUU<miR-146a,miR-146c>
+GAACUGUAAGUCUGUGACGGGUAA<miR1872>
+AUCGACCGUGUUAUAUUCGC<miR-369-5p>
+UGAGGUAGUUGGUUGUAUUGUU<let-7d>
+UUGUGCGUGUGACAACGGCUA<miR-210>
+CAUCGAGACGGUUCCAUACA<miR-2761*>
+UCUUUCAAAACUGCAGGACGG<miR-2854>
+UCUCCCCAUUCCUUGUGAUUGCU<miR-2247>
+AACGGCAAAAACUACAGGUAGC<miR-2231*>
+AUGAUUAAUAUUUGCAGUGGC<miR2638a,miR2638b>
+CACUUGAGGAUGUACCACCCA<miR-547*>
+GUGCCUACUGAACUGGUAUCAGU<miR-189>
+UGAAGCGAUAAAGCAGGUUGCAA<miR-2490>
+ACUUAUCAGCUCACAUCACAGA<miR-2329-5p>
+CCCAGGAAUCAAACAUAUUAUUA<miR-190>
+GGGUGAUUAUUCUCAGAGUUC<miR1064-3p>
+AUUCACGGGGACGAACCUCCU<miR2647a,miR2647b,miR2647c>
+UCACCGGGUGAACAGAAGCUGU<miR-37>
+UGAAAUUCCUGUAAAAUUCUUG<miR1866-3p>
+GUGGGUGGGGGCAUCUCGGA<miR-1230>
+UAUGUGGGACGGUAAACCGCU<miR-299*>
+CCUGCUGAUCUCACAUUAAUUCA<miR-2895>
+GAGGUGAGCAGGAGUUGCGCUU<miR-M1-3>
+ACAAUGAAAUUAACCUUCUC<miR-4015-5p>
+UGUGGACACCGUGGGAGGUUGG<miR-3093-3p>
+CCAGUCCUGUGCCUGCCGCCU<miR-1910>
+GUAUCUUUUUUAUUACGUACAAA<miR-2161*>
+CGCAUUGUAUGGCCUACUUAACU<miR-1002*>
+UGAGCUGAGAGACAUAACCCC<miR1108>
+AACAUCACAGCAAGUCUGUGCU<miR-499,miR-499*,miR-499-3p>
+CUCUAGAGCGAAGCGCUUUCUG<miR-523b>
+UGAGGACCAAGUGCAUCACUGC<miR-1750>
+GGAAUGGGCUGUUUGGGAACA<miR482*>
+GGUGCAGUGCUGCAUCUCUGGU<miR-143*>
+GUGGGCCGCUGUUCACCU<miR-BART5*>
+GGCAAGAAGUCGGCAUAGCUG<miR-31>
+CUGGGGUUCUGAGACAGACAGU<miR-3170>
+UCGUGUCUUGUGUUGCAGCCG<miR-187>
+GCUCGCUUCUCUUUCUGUCAGC<miR156k*>
+UCUCCCUUGAGGGCACUUU<miR-4287>
+GUAAGUGCACCAGAUUGGGAA<miR-2494*>
+UUAUAAAUCAUCCUUGCACUAC<miR-2042>
+UGUUAUAGUAUCCCACCUACCC<miR-2985>
+CGUGUUCUGGCAGUGGCAUCCC<miR-263a*>
+UCAGUGGAUUUGUAGAAAGUUUUA<miR-3012b>
+UUCCACAGCUUUCUUGAACUU<miR396,miR396c,miR396f,miR396a,miR396b,miR396d,miR396e>
+GCAGCAGAGAAUAGGACUA<miR-922>
+AUUGGUCCCCUCCAAGUAGCUC<miR-245>
+AGGCAGUGUAAUUAGCUGAUUGU<miR-34b-5p,miR-34b>
+UCCCUGAGACCUCAAGUGUGA<lin-4>
+CUUUGGGAUUUUCUUACAGCGA<miR4241>
+CGUCGGGCUGAUCCCCGCUGCG<miR-2994>
+ACGUGGGAAGUUUGGCAGAGCAUG<miR-1809>
+AAAAAGUUCGUUAGGGUUUUUC<miR-2284d>
+AUCUUUUAGAACGGCCAUCUGAUG<miR-2738>
+ACUGCAUUACGAGCACUUAAAG<miR-20a*>
+CGAAACUGGUGUCGACCGACA<miR401>
+UUGAAAAGGGACAGCAGAGAAGCC<miR4393b>
+CCAGUGGGGCUGCUGUUAUCU<miR-194*>
+CACAACCUCCUUGAGUGAGCGA<miR-307>
+UCACAGGACUUUUGAGCGUUGCC<miR-249>
+AACAUUCAACCUGUCGGUGAGUU<miR-181c>
+UGGCAGUGAUUGCCACGUCAU<miR2602a,miR2602b>
+UAGUACCGGUUCGUGGCUAACC<miR1131>
+UGCACCAUGGUUGUCUGAGCAUG<miR-767,miR-767-5p>
+AGCUACAUCUGAAUACUGGGUCA<miR-222b>
+ACCGACCGUUGACUGUACCUUG<miR-181a-2*>
+CUUGGGGCAUGGAGUCCCA<miR-4260>
+CGGUGGGACUUGUAGUUCGGUC<miR-1938>
+GUGAAGUGUUUGGGUGAACUC<miR395o>
+AGGUGGGGAUUAGUGCCAUUAC<miR-92a-2*>
+GGCGACCCAUACUUGGUUUCAG<miR-551b>
+UUUCAGAGGUGCUGGGUGCUU<miR-1465>
+CUUUGGUUAUCUAGCUGUAUGA<miR-9>
+GUAAGUGCCUGCAUGUAUAUG<miR-467b>
+AAACCGUUACCAUUACUGAGUUU<miR-451>
+UCUCGUCGGUUUGAAGUUGGCUAG<miR-3322>
+UAUUGCACUUUUUUGCUUUGA<miR-2059>
+GGAGCAUCAUCAAGAUUCACA<miR172c*>
+GUGUUGGCCUGCUGGCCGGCG<miR1082b>
+UGACCUAGUGGGAAACCAUAGC<miR-1361>
+UGAGGAGUUAAUUUGCGUGUUUU<miR-1891>
+CCAGAGGGACAUGGCAGGGCAA<miR-1699>
+CAUCUUACCGGACAGUGCUGG<miR-200a*>
+UCAAAAAAUCUGCAGAAUG<miR-4182-3p>
+AAGACGGGAGGAAAGAAGGGAG<miR-483-5p>
+UUGCGCGUGAAUUUGAAGGCU<miR1043-3p>
+UUAUCAAGAUAAAUGCCAUAAA<miR-2044*>
+CCAGUCUUGCAUUUAUUCCACU<miR-3027>
+CAUCCCCAUUCCACUCCUAGCAG<miR-2954>
+UGGUGGUGGUUUACAAAGUAAUUCA<miR-876-3p>
+GAAUGUUGUUUGGAUCGAGG<miR165b*>
+GUAGAAAGUUUGGAGGUGGAU<miR-2789>
+UAAGUGCCUGCAUGUAUAUGCG<miR-467a>
+UGAGUUCGAGGCCAGCCUGCUCA<miR-1195>
+CAUAUACUGCAUAAUCAAAGUUG<miR-9b*>
+UGACUAGAGCCAAUUCUCUUC<miR-247>
+UUGAGCCGAACCAAUAUCACC<miR171g>
+CGCCGUCCUUGGUGCUUUC<miR-103*>
+GAGGGCAGUGAGGCUCAGGGCUG<miR-2467>
+GAGUUCCACCAUGCAAGUUUU<miR-969*>
+UAAUUGGGGAUGUUCGGUUGCU<miR1853-3p>
+CCAGACAGAAUUCUAUGCACUUUC<miR-1324>
+CUAAGGAAAUAGUAGCCGUGAU<miR-994>
+AGGGCAUGCUGCGUGCCAUGG<miR1163.2>
+AAUCCCUUAUAUUAUGGGACGG<miR818d,miR818e,miR818c,miR818a,miR818b>
+UAGCCAUUUGCUUGAAGGUCA<miR1068>
+AUCAGAACAUGACACGUGACAA<miR1520d>
+AUCGUGCAUCCUUUUAGAGUGU<miR-517,miR-517c>
+UCUUGUGAUGAGGGAGUCUGAGG<miR-2356>
+UAUGUGUGUGUGUAUGUGUGUAA<miR-1187>
+UGGAAGACUGGUGAUAUGUUGUU<miR-7-5p>
+UGAUGAAUGAUGACGAUGUAU<miR419>
+GCAGUAGUGUAGAGAUUGGUUU<miR-3129>
+UAUCACAGCCAUUUUGAUGAG<miR-13a>
+UCAGAGUAUCAGCCAUGUGA<miR3434*>
+CCCCUGAGACCCUAACUUGUGA<miR-125>
+ACCUGAUUGGUGAUGCUUUUUUGG<miR3640*>
+UACUACUCCCUCCGUCCGAAA<miR1128>
+UUUUGAUUGUUGCUCAGAAAG<miR-315>
+UGAGCCUCUGUGGCAGCCCUC<miR771>
+UGACCGUAAUCCCGUUCACAA<miR-360>
+CAGGACUGUCUUAGAAAGCCAGGC<miR4356>
+UUUGGACUGAAGGGAGCUCUA<miR159>
+AAUCACAGUCACCUGAUGGU<miR-250>
+UUUAAGGGGUUCACUGGUAUA<miR1222d>
+AAGCCUGCCCGGCUCCGCGGG<miR-596>
+CGGCUCAUCGUGUGGCAGUUUGCU<miR-745*>
+UGUUGGGGACAUUUUUAAAGC<miR-3094>
+AAAGUGCUUCCCGUUCGGAUGA<miR-1420c>
+UCACAGGACUUUUGAGCGUUGC<miR-249>
+UUUUGUAUGUUGAAGGUGUAU<miR857>
+GUCCUCUGGUUGCAGAUUACU<miR2111*>
+CAAUUUCUAGUGGGUCGUAUU<miR841b*>
+CACUGGUUUUAGCUUCGGUG<miR-35c*>
+AACUGGCCCGCAAAGUCCCGCU<miR-193b>
+UUGCAUAGAUUGUCCGAACA<miR-4043-3p>
+CCGCUUUCUGAGCUGGAC<miR-4315>
+ACUUCAACAGGAGCAAGACUGA<miR-1744>
+UGAAUUUCGCUGGAGUUCUGCCGGA<miR-2941-2*>
+GGGCGGUGGCACCCGCCGUCGGAGUA<miR-H4*>
+GUGAGUGGUGAUGAUGAUCAAUAUU<miR-2571*>
+UAUUGCACAUUCCCCAGCCUGG<miR-311b>
+CUAAGUACUAGUGCCGCAGGAGU<miR-252a>
+GAUGGAUAUGUCUUCAAGGAC<miR861-3p>
+UAAUACGUCAUUUGGUGUUCCUAU<miR-70>
+AGUUUUGCAGGUUUGCAUCC<miR-19b*>
+UCAGAACAAAUGCCGGUUCCCAGA<miR-589*>
+GAGUAACAUACACUAGUAACA<miR1139>
+GCCCCUGGGCCUAUCCUAGAA<miR-331-3p,miR-331>
+UAGCAGGCAUGUCUUCAUUCC<miR-BART20-5p>
+UCUCUGGAGGGAAGCACUUUCUG<miR-518c*>
+AUAAAGCUAGGUAACCAAAACA<miR-9-3p>
+ACGGUAGCAUUCACUGUAAC<miR-4011b-3p>
+UCUUCCCAAUUCCGCCCAUUCCUA<miR482a-3p>
+UGGCAGGGAGGCAGGGAGGGG<miR-1207-5p>
+AGGCAAACCCGAGCUCCUCCUU<mir-M1-5*>
+CAUCUGGCAUCCGUCACACAGA<miR-3126-3p>
+AACGGUGCAUGGACUGGCUAGA<miR-rL1-12-3p>
+UUCCUAUAUGAACACUGUUGC<miR2876>
+UAACGUGUCUCCUAUUUUUAGGGA<miR478s,miR478h,miR478n,miR478k,miR478u,miR478j,miR478l,miR478r,miR478o,miR478i,miR478p,miR478q,miR478m>
+UACCCUGUAGAACCGAAUGUGUG<miR-10d>
+GUGAGUGCUGUAGGAUGGGGCUC<miR-3537>
+CUUUAUUGUUGAUGUCAAAA<miR2931>
+UCAGGAAUGGGCUAAAUGCCAA<miR-461>
+GGGGGGGUUCGGGCAUCUCUAC<miR-H5-5p>
+UUGUUGAUUCCUUGGAGAUUG<miR4244>
+UAACUCAGGUGGUAUGUUCCCA<miR1084>
+AAAGGAGGAAAUAGGCAGGCCA<miR-3173>
+AUAAGUAGGUUUUAUUCAGUUU<miR-2797c>
+AUCAGUGCAAUCCCUUUGGAAU<miR393a*>
+CUUUCUCGGCACUUGAGGAUGU<miR868*>
+UUCUGCUGCCUGCCUUUAGGA<miR-3098-3p>
+CAAAGUCAGCAACUUGAUUCCAGCAACUG<miR-284>
+ACGGAGAGUCUUUGUCACUCAG<miR-802*>
+UAUUCUCAGAGUCAAAAAUAGU<miR-4155-3p>
+CGAAGAGAGAGAGCACAGCCC<miR529c,miR529b,miR529a>
+AGUCAGGCUCCUGGCUAGAUUCCAGG<miR-344*>
+AGCUGUUUCACGGCGUUCCA<miR-4018b-3p>
+GAAGGGUGUGCAGAAGAAUGUGA<miR-1570>
+UUCCAGCUGCAUACAAAUUUCA<miR-2807a>
+ACUGUGUCAAUCCAGGGUAGA<miR-3561-5p>
+CAUCUGGGCAACUGAUUGAACU<miR-1298*>
+UUAAGACUUGCAGUGAUGUUU<miR-499,miR-499-5p>
+UAUCACAGCCAGCUUUGAUGAGCG<miR-2a>
+UUUUGGAAAUUUGUCCUUACG<miR426>
+UUCCGCUGGAUGUCCAUGU<miR3452*>
+UAUUGUGUUUGUCAGUGCGGUAUA<miR-2847>
+AAAAGUAAUUGCGGUCUUUG<miR-548j>
+UGGAUUUCUCUGUGAAUCACCA<miR-876>
+UGAAAAGUUCGUUCGGGUUUU<miR-2284x>
+CAUGUGUCCGCCCUCUCCACC<miR164e*>
+ACAGUAGUCUGCACAUUGGUUA<miR-199a-3p,miR-199b-3p,miR-199b>
+UGAACUUUCCCAGGAAUAAG<miR-1502d-5p>
+UAAGUACUUCCAUGCUU<miR-302e>
+AGAGUUGAUGUUGAUGACGCA<miR2079>
+UUAAAGCUACCAACCGGCUUCA<miR-75>
+UCCUGUAGAGUAUGGGUGUGGUUU<miR-rL1-15>
+GCGUUGUCUCGUAGAGGUCCAG<miR-M10-5p>
+CACUCAGUAAGGCAUUGUUC<miR-201>
+CAGUGCUUCUGCAGUGCAAACA<miR-33*>
+UAGUGGGAGAUUUUGUGUAAC<miR1109>
+CUGAGUGAUGACUGCUGACC<miR-2383>
+CCUUUAAAUUGUGUCCUCAAG<miR-3094*>
+GUCCCCGGGGCUCCCGCCGGC<miR-2889>
+UAAGUGCUUCCAUGUUUUGGUGA<miR-302a>
+AGAAUCGUAGCGCGUGUUGUUU<miR-2215>
+CAGAUCAGAAGGUGACUGUGG<miR-383>
+AGGGACUUUUGGGGGCAGAUGUG<miR-365-1*,miR-365*,miR-365-5p>
+CCAACAGGUCUGCAUUCGGC<miR-4094-3p>
+UCAGACUGAGAGCAGUGUGCCU<miR-2461-3p>
+UCCCUGAGAAUGCUCUGACUGCU<miR-237>
+UGGACAACUGAGGUUCCUGCU<miR-2296>
+UUUGGAGUGAAGGGAGCUCUG<miR159i,miR159h>
+AUAUACAUACACACACCUACAC<miR-467d*>
+AAAAGUAAUUGUGGUUUUUGCC<miR-548d-5p>
+UGCGUUGCGUGCGACUUCCCUU<miR-1421g-1*>
+AGGGUUUUUCAUGGAGUUCG<miR-1502c-3p>
+CAGCUCUAUCGUCAUUGUAU<miR-4032-3p>
+CGAACCAUCACCUUCCAAACC<miR3445.1*>
+AGUCGCACUCGUCCCUGGCUCAGG<miR-H14-5p>
+CUGAUAAGAACAGAGGCCCAGAU<miR-3161>
+GAUCUAGCCUCUACUAGGCUUUGUCUGU<miR-282>
+UGGUGCGGAGAGGGCCCACAGUG<miR-675a,miR-675>
+AGCGACUAUCUCAGGGCGCGCU<miR-2830>
+UACCUGAGGUGGAUUAUUCACU<miR-2236a>
+UGACUAGAUUUUCACUUAUCCU<miR-279d>
+UUCUCAAGAAGGUGUCAUUCAU<miR-513c>
+UCGUACCGUGAGUAAUAAUGCG<miR-126-3p,miR-126>
+UCUCUCUGGUUAGACCAGAUCUGA<miR-TAR-5p>
+AAGGCAGUGGCACAGACAGGGA<miR-1360>
+UGGGUGGUCUGGAGAUUUGUGC<miR-1293>
+CAGAAUCGCAGAAUGGCUGAGG<miR-3524>
+UUGAGAGCAACAAGACAUAAU<miR863-3p>
+UUCCCCGUCCGUACCGAGGCCA<miR-m22-1>
+AGAGGUUGCCCUUGGUGAAUUC<miR-377*,miR-377>
+UCUCACACAGAAAUCGCACCCGUCA<miR-342>
+AAGUGAUGACAUGACAAGCGAAGU<miR4371a>
+UCCGAGCCUGGGUCUCCCUCUU<miR-615-3p,miR-615>
+GGCUUGGCGACUGUAGCAUA<miR-4057-5p>
+UCUCUGUGGAUGGAUGUGGGCAG<miR-2364>
+UAGGCUGAAUAUCUCGGUAGAAU<miR-3397>
+CAUAACAUACACACACACACGUAU<miR-669p*>
+UAUGGCAUUUAUCUUGAUAAAG<miR-2044>
+UGAGCAGUCAUAAGGUAGCCU<miR1113>
+UAAGACGGAACUUACAAAGAUU<miR4345>
+ACCAAGGUGUGCUAGUGAUGAC<miR-2011>
+ACCCUUGUUCGACUGUGAUGUG<miR-2c-5p>
+AGGCACCAGCCAGGCAUUGCUCAGC<miR-593*>
+AUAAAGCUAAUUCACUGAGUGU<miR-9d>
+UUAUUUGCCCGAAGGGGACGUCCU<miR1143>
+UACGACGAUGCGACAAAUAUGACA<miR-2807c>
+UUGCGUAGGCCUUUGUUUCGA<miR-242>
+UGGUUGGUGGUUGAACUUCGAUUUU<miR-973>
+UCGUGUUCGAGCUCGCGUCC<miR-2289>
+UCGCCGCUCUCCUGUGACAAG<miR3627*>
+AUCACAGACCCGAUGCAGCGA<miR-2b>
+CUCACAGCUCUGGUCCUUGGAG<miR-673-5p>
+UCCUGUGGUGUUUGGUGUGGUU<miR-BART12>
+CGCCAAUGACAAACUGUUGAU<miR-2149-5p>
+UAUGACACUAAAGCGUAGCAUGG<miR-64d>
+UGACAGAAGAGAGCGAGCAC<miR156e,miR156k>
+UUUUCCCACACCUCCCAUCCC<miR472>
+CAGAGGAAGACUGAUGCUAGUU<miR-3539>
+UGCCACACUGCAACACCUUACA<miR-3064-3p>
+UGGCAAGAUGUUGGCAGUUCAGU<miR-73>
+UUGGUGUUCAACCUUACAGUGAG<miR-971>
+UGCCUGUCUACACUUGCUGUGC<miR-214*>
+GGCAGGUCCUCACCCUCUCUAGG<miR-657>
+CAAGUCACUAGUGGUUCCGUUUA<miR-224>
+AACAUUCAUUGCUGUCGGUG<miR-181b>
+CACAGCAAGUGUAGACAGGCA<miR-3120>
+UUUGAUUGGUAUGCCUGCAUU<miR2651>
+AAACAUAGAGAAGUUUGACUU<miR437>
+UGCUUCAUCUACUAGGUUAGCU<miR-4079-5p>
+CAGUGCAAUGAUAUUGUCAAAGC<miR-301b-3p,miR-301b>
+AGACCAUGGGUUCUCAUUGU<miR-591>
+CAAGCUCGUGUCUGUGGGUCCG<miR-99b*>
+AAGGGUACUCUCAUCACCAAUGU<miR-M1-12*>
+UAGCAUCAUUUGAAAUCAGUGUUU<miR-29e>
+UGGCGAUUACGCGAUUUGCCGUGACCAGA<miR-3257*>
+GAAGUGCUUCGAUUUUGGGGUGU<miR-373>
+UGGUCACCUGACUUGCAGUGU<miR-1421h>
+AGGGAAUCGGAAAGAGUGUAC<miR1023c-3p>
+UAGAAGAUAAGAUUGUGGCCAG<miR-3002>
+UGGAGAAGCAGGGCACUUGCU<miR164a,miR164b>
+UGUGUGCAUGUGCUUGUGUGUA<miR-466h-5p>
+CGGUUUUCACCUUGAUCUGAG<miR-81*>
+UAAAUGCAUUAUCUGGUAUGAU<miR-277c>
+AAAUAUCAGCUGGUAAUUCU<miR-283>
+GUAGGUUUUGUGGUUUUGUU<miR-1816>
+UGAAAGUUUGUUCGGGAUUUU<miR-2284p>
+CAUCCAUAUUUUCAUCUCGAA<miR774b*>
+UGCUAUGCCGACAUGUUGUCAU<miR-31*>
+AGGGGUUCACCGAGCAACAUUCG<miR-3581>
+UGAUGGUGAUGCGCUUGUAUC<miR1216>
+UUUGAGGCUACAGUGAGAUGUG<miR-1304>
+ACUCAGUCAUGGUCAUU<miR-4264>
+CAGUUACGUUAGCACUUACCA<miR-31a*>
+GGUCGAGCAGACAACGAAGAU<miR858*>
+CUCGCUUGCUCCGGCCGCCAC<miR2924>
+AGUGACAUCAUAUGUACGGCUGC<miR-489>
+GGCAGUCUCCUUGGAUAUC<miR169i*>
+UCCGCUUCUAACUUCCAUUUGCAG<miR-788>
+UAACGGAACCCAUAAUGCAGCU<miR-462>
+UUAUGAUAGGUGUGACGAUGUC<miR-US5-2>
+GGAGCCAAGGAUGACUUGCCG<miR169e>
+UAUGCAUAUUGUAUUUUUAGGUCC<miR-586>
+GGAAUGGGCUGAUUGGGAAGCA<miR482*>
+UGAAAACUCAUUUUGCAUGCAG<miR-1339*>
+UCCGCUUCUCAAUGCUCCAUUUGCAA<miR-788>
+UAAUACUGUCAGGUAACGAUGUC<miR-8>
+CCCCUGCUGAGGUUCUGCUUC<miR-1774>
+UGGAAUGUUAAGAAGUGUGUGU<miR-1b>
+UGGAGUGGGAGUGGGAGUAGGGUG<miR3948>
+AACUGAUUUUGUUUGGGA<miR-1358>
+UAGUGCAAUUUGUUGUAGCUUG<miR-4220-5p>
+CAUGGUUAGAUCAAGCACAA<miR-3565>
+UGCAUCAUGUGUGACCUGCCC<miR-1421k-1*>
+UGAUACACUAGCACGGAUCAC<miR2199>
+AGUUGUGUGUGCAUGUUCAUGUCU<miR-669a-5p,miR-669p>
+ACUGUAAUGUGGGCACUUACA<miR-20b*>
+AAAAUAUCGGUGUUGGGUAAAA<miR-2024b*,miR-2024a*>
+UCUGGGACAGUCACAGCAUCUUU<miR-1683>
+UCACCGGGUAGACAUUCAUU<miR-36c>
+CCGCGCAGUGCCUCGUCCUCGA<miR-3523>
+UGGAACAUGUAAAUAAGGGC<miR-4006c-5p>
+UUGUGACCGUUACAAUGGGCAUG<miR-2001>
+AAUGACACGAUCACUCCCGUUGA<miR-425-5p,miR-425>
+CUCCCUAACGGAGUCAGAUUGA<miR-929*>
+CAAAUUCGUAUCUAGGGGAAUA<miR-10a*,miR-10a-3p>
+UCACGUGACGGGCCUCGGCG<miR-1840>
+GGGGUGUGAUGAUUUGAAAC<miR1167>
+UUCACAGUGGCUAAGUUCCG<miR-27a-3p,miR-27a>
+CCCAAUGAGCCUACAGUCUAAG<miR-3086-3p>
+UAUGCAUUGUAUUUUUAGGUCCC<miR-586>
+ACCUAGUAAUUGUGCGGUGUU<miR-rL1-4-5p>
+CUAUACAACUUACUACUUUCCU<miR-98*>
+UAAAUGCCAGUCGUUGCUGGAAU<miR-357>
+GAUUGCACUAGUCCCGGCCUUC<miR-92a>
+UGGAGUGACUGUCAGAUGCAGCCA<miR-2411>
+UGGAAUGUUGAGAAGUGUGAUU<miR-1a>
+UGACGUGUAAAUUGCGAGACGAAU<miR442>
+AGGUGGGGAUUGGUGGCAUUAC<miR-92a-2*>
+AGGUCGUGGUAUUUCGUACCUUCAUGG<miR-3391*>
+GACCUGGACAUGUUUGUGCCCAGG<miR-619>
+UACAGUAGUCUGCACAUUGGUU<miR-199*,miR-199b*,miR-199a*>
+AGGGACGGGACGCGGUGCAGUGUU<miR-92b*,miR-92b-5p>
+UCAACCGAGCCGAGGAGGAGG<miR2091-5p>
+AGAAGAGAGAGAGUACAGCUU<miR529b>
+AAUCUAGCCUCUUCUAGGCUUUGUCUGU<miR-282>
+UACCGCGUCCACCUGAGGGGA<miR-1385>
+UUGAAGAAUUGCAGGUGGUGGAC<miR-1497h>
+AACCCGUAAAUCCGAACUUGUG<miR-100>
+GCUGGUCAAACGGAACCAAGUC<miR-133b*>
+AUAUGAUAUCACCCAGCACCAC<miR-1419f>
+UUUGGUCCCCUUCAACCAGCCGU<miR-133>
+UCAAUGCCUGCUCUAUCGGUUC<miR-2819>
+AGGCAUUGACUUCUCACUAGCU<miR-1256>
+UUAAUGCUAAUUGUGAUAGGGGU<miR-155>
+CUCGGUAGAAGAUCUUCCCUUU<miR-2774b>
+AGGUCCUCAAUAAGUAUUUGUU<miR-1264-5p>
+UACAUGUCAGUGACAAAGGCA<miR2905>
+UGGAGAUGCGGCCCUGUUGGAAU<miR-139*>
+CGGCAGUGUAGUUAGCUGGUUG<miR-34>
+UACCCUGUAGAACCGAAUUUGUG<miR-10b>
+GCUGUAAAUUGUAAUGGCCAAAGC<miR-971*>
+CGCUAUCCAUCCUGAGUUUC<miR390a-3p>
+UAUGGAGGUCUCUGUCUGACU<miR-1843-5p>
+AAGGAACUUGAGAACAAGGUUGA<miR-276c>
+UCUGAUGAAGACAGCCCUGCU<miR-2471*>
+UGUAAACAUCCCCGACUGGAAGCU<miR-30d-5p,miR-30d>
+CCUGCUGCCUAAGUGCUUAUCA<miR-252*>
+AUGUAUAAAUGUAUACACAC<miR-568>
+AAUUUACUUCCAAGCUAACUGA<miR-2280*>
+AACAUUCAUUGUUGUCGGUGGGUU<miR-181d-5p>
+CCGGCGUUGCGCUCAAUUAUG<miR397a*>
+CGGUCGCCGCCACCCGAGCCG<miR-1181>
+UAGAAGCAGUUAGUCAGAUAGUU<miR-3251>
+UGGUGAUCGGCGUGCUAGCCGU<miR-M55-1>
+AAUGUGUAGCAAAAGACAGGA<miR-511*>
+AUGAGCCGAACCAAUAUCACU<miR171f>
+AGAGGGGGAGUGUGUGGUCUGU<mir-M1-2-5p>
+AAUGGCACUGUAUGAAUUCACUG<miR-183>
+UUCUCCUCGAUCGCCCGCCUG<miR3453>
+AUGAAGUGUUUGGGGGAACUC<miR395l,miR395f,miR395r,miR395o,miR395j,miR395a,miR395i,miR395k,miR395q,miR395d,miR395m,miR395c,miR395n,miR395e>
+AGGGGCUAAAUUGCCUGCCA<miR-4008c-3p>
+UUUGGCAAUGGUAGAACUCACACCG<miR-182>
+AGCUAUUCAACUUCUUGUCUAU<miR-31*>
+AAAGUGCUUCCUUUUAGAGGGUUAC<miR-519a>
+GCCAAUUCGUACAAGUUCAA<miR-4001a-2-3p>
+UGGCCUCCGCAGGGUUGAAGCU<miR-3593-5p>
+CAGUGAUUCAAGUCCUAUCU<miR-4041-5p>
+GCGCUGGUUUUACUGAAGUUGUG<miR-2688*>
+AGAUAAGGAACUGAACUGGCU<miR-1749>
+CAACGUUAUCGCCGUCUUCA<miR-4074-3p>
+GUCAGUGCAAUCCCUUUGGAAU<miR393c*>
+UUUAGGUUUCACAGGAAACUGGU<miR-303>
+UAUAAAUACAUGCACACAUAUU<miR-466l-3p>
+CAGUCUUACUAUGUAGCCCUA<miR-1191>
+UCAAUGCACUGAAAGUGACUA<miR161>
+CGAUUGUCACCUUUUUGAGUAGA<miR-508>
+GUUUCCUUCAAGCACUUCACAU<miR395k*>
+UGCAUUGCGACGGGUUACAUCA<miR-1397>
+AGCUCGGCCACAUACUGCCACG<miR-72*>
+AGAGAUUGGAAAUGUACUUUU<miR-2833b>
+UGGCACGGCGUGAUGCUUAGUCAG<miR1119>
+AUGUAUCGUAGUCUGUUGC<miR-2991>
+GCGAUGUGACUGAUGCAGGCUG<miR-1791>
+CUUGGCACUCGCGAACACCGCG<miR-790>
+CACUGCAUCCCAAGUGAUCACC<miR-1421o*>
+CCUCCGUCUCGUAAUGUAAGACG<miR1130>
+AUCUAACGACUCUCAGAUAUCA<miR3509-3p>
+UUACGUAUACUGAAGGUAUACC<miR-iab-4-as>
+AUACAGCUAGAUAACCAA<miR-3597-3p>
+GGGCUCGGAAUAGUGUCAAGA<miR-3262>
+UUGUCAUCGCGGGUAUUAUGCA<miR-959>
+UAGAUGAGGACUCUGAGA<miR-1371>
+GAAGUGUGCUGUGGUGUGUCU<miR-595>
+UAGAAUUUAAGGAUAAGGUAGGGU<miR-3261>
+UGCCUGGCUCCCUGCAUGCCA<miR160h>
+CAUAUUACCUCGUGGGAUUUC<miR-3477>
+CAGUAACAAAGAUUCAUCCUUGU<miR-802>
+AUGCAGUAUAUCCAUCGUGC<miR-3598-3p>
+UAGGUGCGUUUCCACCAAAG<miR1038-5p>
+AGUGGCGUAGAUCCCCACAAC<miR4412>
+AUCUGUAAGAGAAAGUAAAUGA<miR-3686>
+GUGCAUUGUAGUUGCAUUG<miR-33-5p,miR-33,miR-33a>
+GCCGUCGGCGUGUUGCGGUG<miR-2526>
+AAGGCUCUUCUUUCCUUGCAG<miR-3542>
+GGGCAAGCCGCCGCCGCCAC<miR2102-5p>
+UUAAUCUAGGAAAUUACACUCG<miR1509b>
+UCACUGGGAGAGUGAUGAUUGC<miR-2733c>
+CUAGACUGAGGCUCCUUGAGG<miR-151*,miR-151-3p>
+GUUUAGUCAGGUGGGGUGUGA<miR-1380>
+AACUAGUAAUGUUGGAUUAGGG<miR-3923>
+UGAACACAGCUGGUGGUAUCU<miR-317>
+UUGGUGGAUGAUUGAUUCCUAA<miR-3005>
+GCCAGAUGUGUUAAAAUAAUGACC<miR2879>
+UCAGUAGCCAGUGUAGAUCCU<miR-222*>
+ACAGUAAUGGUAUGAACUCAGA<miR-1685>
+UGCCUGGCUCCCUGUAUGCCA<miR160g,miR160,miR160d,miR160a,miR160b,miR160c,miR160f,miR160e>
+UUCUGCUAUGUUGCUGCUCAU<miR779.1>
+AAACUACUAAAAAUCAAAGAU<miR-606>
+AUGCGCACUGCCGAGGAUUUC<miR-3482-3p>
+UGUUAGUCUGAACUCGGUCUAGU<miR833-5p>
+AAAAUGCAUUAUCUGGCCAAGA<miR-277b-3p>
+UCCCCCAGGUGUGAUUCUGAUUUGU<miR-361*>
+UUUCCAGGUGUUUUCAACGUGC<miR-UL36*>
+UUAGAUAGAGUGGGUGUGUGCUCU<miR-BART16>
+UAACGCACAACACUAAGCCAU<miR2939>
+ACCACUGACCGUUGACUGUACC<miR-181a-2*>
+CGGAUUGUUGAUCCGUAUGUGCAU<miR4380a>
+UACCCAGCUCCGACGGAAUGG<miR3454g*>
+GCUCACUGCUCUAUCUGUCACC<miR156l*>
+ACUGGGGGCUUUCGGGCUCUGCAU<miR-637>
+AAGGUGUGGAUGCGGCAUGGG<miR1142>
+UCCAUAUCCGUGCUCGGACGCUU<miR-3337>
+UAGCACCAUUUGAAACCAGU<miR-29>
+UAAAUGCAUCUUAACUGCGGUGA<miR-232>
+CAGCACCAUCAAGAUUCACA<miR172b*,miR172d*>
+UGAGUAUUCUAUCAGGAGUCGA<miR-12>
+AAGCGAAAUUCAAGAUGGUUGUA<miR-1829c>
+GCUCACUGCUCUAUCUGUCAGA<miR156c*>
+CACUGGGCUUGUGCUCACUGUC<miR-1338>
+UGAAAACCUUGUUUGGAUUGGC<miR-1422d,miR-1422d*>
+GAAGAAAUCUAAGGUCUGAGG<miR-1434>
+UGGAAGACUAGUGAUUUUGUUGUU<miR-7>
+AGCGGCGAGGCUAUUCAAGUAA<miR-986*>
+GGGAUAUGAAGAAAAAU<miR-3201>
+UGAGUGGGCAAAAUGGGACA<miR-4165-3p>
+UAUUGCACCUGUCCCGGCCG<miR-92d-3p>
+UCUCACGGCAUAUCAAUCACUUGCAG<miR-2535>
+AGCAGCAUUGUACAGGGCUAUCA<miR-107b,miR-107>
+UAGCACCACAUGAUUCGGCUU<miR-995>
+UCAAGAGCAAUAACGAAAAAUGU<miR-335,miR-335-5p>
+UAGCCAAGGAUGACUUGCUCG<miR169x>
+GAAUCUUGAUGAUGCUGCAU<miR172e>
+AGCGAGGUAUAGAGUUCCU<miR-276*>
+UUCGCGGCAGAAAUAGGCAAA<miR-2848>
+GCAAGUUGACCUUGGCUCUGC<miR169f*>
+UAUUUAGAACGGUGCUGGUGUG<miR-465>
+UAGGUAGUUUCAUGUUGUUGGG<miR-196-2,miR-196,miR-196a>
+CACGGUUCAGCUGCAUCAGG<miR-4197-5p>
+UCCAAUAGGUCUAGCAUGUGC<miR862-5p>
+UCUCCCAACCCUUGUACCAGUG<miR-150>
+AGCGUGAUGACGUGACACUCCGUC<miR4387c>
+AUCCCGGAAGAGCCCCCA<miR-1937c>
+GCAGCAGGGACAGAUGUGUUUAC<miR-2060>
+AGGCAGUGUGGUUAGCUGGUUG<miR-34>
+AAAGUUCGUUCGGGGUUUUC<miR-2284o>
+UUUCCGACUCGCACUCAUGCCGU<miR3634>
+AAAAAGGUGAGGUUUUGUUUU<miR-553>
+CGAGCCCGGCACGUGGAAGAGCC<miR-2373*>
+CAAAAAUCUCAAUUACUUUUGC<miR-548c-3p,miR-548c>
+AAAAGUAAUUGCGGAUUUUGCC<miR-548i>
+UAAGCUUUCACCGGUGGGUUCCG<miR-3356>
+UUCCUUAACUUUCUUUAAACGAAA<miR-3283>
+UCAUGGUCAGAUCCGUCAUCC<miR842>
+UGAGGAGCUCUGCGAGCAUGUA<miR-1597>
+UGACAAUUUAAUGGGUCUAGUA<miR-rL1-25>
+CUUUUCUCUGGCACUGCGAG<miR-4034-3p>
+UAUGUGACGGUAAACGGUGACAAG<miR4381>
+UCCAGCAUCAGUGAUUUUGUUGA<miR-338>
+ACAUCUUCCAAUUAAUGCAU<miR2093-3p>
+AGUUCUCCGCUUCACUUACAG<miR-2556>
+UCGGACCAGGCUUCAUUCCC<miR166a,miR166c,miR166f,miR166e,miR166h,miR166d,miR166i,miR166b,miR166g,miR166j>
+UACCCCGUAGAUCCGAAUUUGUG<miR-10a>
+AUGUAGGGCUAAAAGCCAUGGG<miR-135b*>
+UGUGAUGUGACGUAGUGGAAC<miR-989>
+UCACCUUACUGAAAUAUAUCUGUA<miR-3231>
+GAUUCUCUGUGCAAGUGGAAG<miR173*>
+UAUGCAUCUGUUAUCUUAACUAGC<miR-3249>
+AUAUACAUCCACACAAACAUAU<miR-669m-3p>
+CGGCGCAGCUGUCGGGAGGGCG<miR-2436-5p>
+UGCCUUACAUGGGCCCGUGG<miR-2516>
+ACUGCAGUGAGGGCACUUGUAG<miR-17*>
+AACCAGAUGUUGUAAGAACGA<miR-3015c>
+UGGAAUGAUGAGUGCACUGACU<miR-1709>
+CUUGGCACCUAGUAAGCACU<miR-1271>
+UUGCUAUCAGAACAUUGUGUCAU<miR-3246>
+CAGAAGAUAGAGAGCACAUC<miR156a>
+AGGAGGACACAUGUGGGUGCA<miR-1421ah>
+CCUCGUAGCUCGGUCACGAUA<miR-1329*>
+CUCUGGAGGGAAGCACUUUCUG<miR-518d-5p>
+UAUGUGGGACGGUAAACCGCUU<miR-299,miR-299-3p>
+UCGUGUCUUGUGUUGCAGCC<miR-187>
+AAAAACUUUUCCCUUUUUUU<miR-2429>
+UGCACUGAAGGCACACAGC<miR-713>
+GCAUGUGAUGAAGCAAAUCAGU<miR-3607-5p>
+UUGAGCCGUGCCAAUAUCACU<miR171a>
+GUUCCCUGCAAACACUUCACCA<miR395c*>
+AUCACAUUGCCAGGGAUUUC<miR-23a>
+UUUUCUUCUACUUCUUGCACA<miR838>
+UGAGAUUCAACUCCUCCAACUUAA<miR-1175-3p>
+UACUUCUCUGUUCCACAGUAC<miR1094b>
+CUUCAAUUUCACAGCGACCAC<miR3626*>
+UCUCCCUCCGUGUGCCCAGA<miR-343>
+UCAAGAGCAAUAACGAAAAAUG<miR-335>
+UCUGCAGGGUUUGCUUUGAG<miR-1205>
+UUCUUUACAGUGGGUCUCUUU<miR-3481-5p>
+UGAGGUAGUUUGUAAUGCUGUCG<miR-84>
+GAUGGAUAUAUCUUCAAGAAC<miR861-3p>
+AGACCCUGGUCUGCACUCUAUC<miR-504>
+GAAGUGACAUGUGGUUGAUGG<miR-1627*>
+UUCCCGAUGCCUCCCAUGCCUA<miR2118p>
+UUUCCUGCCUCUCACUAGCUU<miR1219d>
+GCUGGUUUCAUAUGGUGGUUUAGA<miR-29b-1*>
+ACAGCACGUGUUACGAUGCUCC<miR-2215*>
+CUAGGUAUGGUCCCAGGGAUCC<miR-331-5p>
+AUACCUCAGUCUUAUCAGGUG<miR-875>
+AACCCGUAAUGAUAAUAAUUCGCG<miR-54>
+UCACCGGGUUAACAUUCAUCCG<miR-36>
+UUGAAGAAUUGCAGGUGGUAGGG<miR-1497f>
+GUGACGAUCGUACAUGUCUU<miR-3502>
+AGAUCAUCUAGGAUUGUUUGC<miR1089>
+CGGUCUUGUGGCAAGAACUGAG<miR1861m,miR1861k,miR1861e>
+AGGCAGUGCAGUUAGUUGAUUAC<miR-34c>
+CAUAGCCCGGUCGCUGGUACAUGA<miR-3651>
+CAACCUGGAGGACUCCAUGCUGU<miR-490,miR-490*>
+AGGGUAUAUAAGCCUUCACUGG<miR-4337>
+UUGUGGCAAAAUUCCCUAGG<miR-4131-3p>
+CAGGUGGAACACGAUGCAAUUU<miR-363-5p>
+CUGGGCUAAGAUUCGCUUA<miR-86*>
+CCACGAAGUUGACGCGCUGUCUCU<miR-3383>
+AAGCUGCCAGUUGAAGAACUGC<miR-22>
+UGAACAGUGCCUUUCUGUGUAGG<miR-201*>
+AAAGUGCUGCGACAUUUGAGCGU<miR-372>
+UUAUUGCUCAAGAAUGCCAAU<miR-234>
+GGGACCCAGGGAGAGACGUAAG<miR-711>
+CAGGCUCUAGCCAGGGGCUUGA<miR-344g-3p>
+AACACACCUAUUCAAGGAUUCA<miR-362,miR-362-3p>
+CUCACCGCCAGAUGAAUGCCA<miR-181c*>
+UGAAGCUGCCAGCAUGAUCUAA<miR167b,miR167a>
+UUAUCCGGUAUUGGAGUUGA<miR435>
+AACAGCAGACGGCAGAAACGGC<miR-2561*>
+ACAGGCGGCUGUAGCAAUGGGGG<miR-3937>
+UAUUAUGCAACGUUUCACUCU<miR-2162-3p>
+UUGAGCAAUGCGCAUGUGCGGG<miR-233>
+UGAUAUGUUGUUUGAAUGCCCC<miR-90>
+UUAAUAUCGGACAACCAUUGU<miR-889>
+UGAGGUCAAAUUGAACGCAUUU<miR-2552>
+UGUGUUCUCAGGUCACCCCU<miR398>
+CAUUCAAUUUCUGCACGGUAGA<miR-955*>
+CAGCAGGACUGGCUUUGUUACGA<miR-2129>
+ACCUGGCAUACAAUGUAGAUUUCUGU<miR-221*>
+UCUUCAACCUCAGGACUUGCA<miR-676*>
+CGUCUUACCCAGCAGUGUUUG<miR-200c*>
+UACCUAAUUUGUUGUCCAUCAU<miR-463*>
+UUAAAGCUACCAACCGACUUC<miR-75>
+AUGUGAACAGUGUCAAACAGUGUC<miR2874>
+UUCCUAACUCUGCCCCCUCCCAU<miR-3573-3p>
+GCUAUUUCACGACACCAGGGU<miR-138-2*>
+UUUUGUUUGCUUGGGAAUGCU<miR-BART19-3p>
+UAUUCAUUUAUCUCCUAGCCUACA<miR-664>
+UGAUGGAUAAAAGACUACAUAUU<miR-3134>
+UCACUGGGUGUAUGAUGAUUG<miR-2733h>
+UUAGCCCGAACCGCUAUCCAUA<miR-rL1-34-3p>
+UGAGGUAGUAGGUUAUGCAGUU<let-7c>
+UUCGCUAGGCAAGCACGGACUG<miR-H19>
+UAUGACACUGAAGCGAGUUGGAAA<miR-63>
+AGGGGUUUCUUUCGGCCUUCA<miR-2796-5p>
+UACUCCAUCCUCUCUGAGUAGA<miR-880>
+AACACGCUAAGCGAGAGGAGCUC<miR1532>
+UUGCUGGUGGAGGGAGCUGAG<miR-1654>
+CUGGGAUCUCGGGGGUCUUGGUU<miR-769-3p>
+UCACCGGGUGAAAAUUGGUAC<miR-35c>
+UAGAAUGCUAUUGUAAUCCAG<miR406>
+UUUGUACUCAUGUAAGGUGAC<miR-2223>
+UGGCCCUGACUGAAGACCAGCAGU<miR-1291,miR-1291a>
+AAGGGAUUCUGAUGUUGGUCACACU<miR-541>
+UGACACCUGCCACCCAGCCCAA<miR-667>
+UACCCGUAGCUCCGAAUAUGUG<miR-100d>
+UGCCCAGGCUGUGCUGUGCUCUGGG<miR-1635>
+UUGUGCGUGAUAUCAAGUAUAAU<miR-2164-3p>
+GCAGGCACAGACAGGCAGUA<miR-1623>
+UGAACUUUACCACGAAAAGG<miR-1502b-5p>
+CUUCUCUGUUUUGGCCAUGUG<miR-942>
+CUUACCCUGUUAAUCGGAGAAGU<miR-1991>
+UGAAAUUAGGACGGAAAUUACAC<miR-2204-5p>
+ACUUAAACGUGGAUGUACUUGCU<miR-302a,miR-302a*>
+AAUCCUUUGUCCCUGGGUGAAA<miR-501-5p>
+AGAAGGAAAUUGAAUUCAUUUA<miR-1252>
+CUAUACAAUCUAUUGCCUUC<let-7f-1*>
+GUGUGUGGAAAUGCUUCUGC<miR-147,miR-147a>
+AGCGAGGUAUAGAGUUCCUACG<miR-276,miR-276*>
+UCCCUGAGACCCUUUAACCUGUGA<miR-125a-5p>
+UUUCGACAAGUAAUUCCGACCGGA<miR1135>
+AAGGGGACUUCUAAUUGUUUGUA<miR-1829a*>
+UGAGAUCAUCGUGAAAGCCAGU<miR-82>
+UGCAGUUGUUGUCUCAAGCUU<miR444c.2,miR444b.2>
+CAAGUCACUAGUGGUUCCGUU<miR-224>
+AAGACCUCACCUAACAGCUUAAGC<miR481d>
+CCGAGCCCCUGUGCCGCCCCCAG<miR-1225-3p>
+UUUCCGGCUCGCGUGGGUGUGU<miR-1180>
+CGAUUUCAGAUGGUGCUA<miR-3556a>
+UCACAAGUCAGGCUCUUGGGAC<miR-125b-2*>
+GUGACAGUCAUCAUUUAAUAAGA<miR1520b>
+GCCCCUGGGCCUAUCCUA<miR-331-3p>
+AUGUUCAGUCUCAGUGGGAACC<miR-4338>
+UAUACAAGGGCAAGCUCUCUGU<miR-381>
+CUCCUAUAUGAUGCCUUUCUUC<miR-337,miR-337-3p>
+CUAGUGAGGGACAGAACCAGGAUUC<miR-921>
+AUAAAGCUAGACAACCAUUGA<miR-4>
+CAAGCUUGUAUCUAUAGGUAUG<miR-100*>
+UAGUACUGGCAUAUGGACAUUG<miR-2012>
+GGAAAAACUCGUCAUGACUGAU<miR-1422g*>
+AAGGACGGUACUUACGUAAGCAAC<miR4368b>
+UCUGUGAUGUGAGCUGAUAAGU<miR-2329-3p>
+UCCACUGUACCGUAUUGGCCC<miR-2710>
+UCUCACAGCUCUAACCUGGCAA<miR-2567b>
+UCAGCCAAGGAUGACUUGCCG<miR169s>
+CGAGGAACGCUCGCUUCACGGC<miR-m01-3*>
+CGAGAACUCCGGCUGUGACC<miR-11*>
+UAGCAGCACGUAAAUAUUGGUG<miR-16a,miR-16b,miR-16>
+CUGGGAUCUCUGGGGUCUUGGUU<miR-769>
+CUGAGAUACGCCCGAUUUGACGAA<miR-H18-3p>
+UUGUCAGCACAGUGGUAUAUGCA<miR-1679>
+GUCUCGAGGAAAGAAGCACUUU<miR-516a-5p>
+AUGAUCCAGGAACCUGCCUCU<miR-640>
+AUCAUAGAGGAAAAUCCACAU<miR-376d>
+CUUAGUUUUCGACGUGUUUUGGU<miR-957*>
+AUAUUGUCCUGUCACAGCAGU<miR-1000>
+GAACUUAGAGAAGUUUGACUU<miR437>
+UGAAGUCAGCAACUUGAUUCCAGCAAUUG<miR-284>
+GGCAGUCUCCUUGGCUAG<miR169i*,miR169j*,miR169k*>
+GUGUUAAUUAAACCUCUAUUUAC<miR-2053>
+UCCUUAACUCAUGCCGCUGUGC<miR-1416>
+GCGCAUGUUCUAUGGUCAACCA<miR-3579>
+UACAGAAGUGUUCGUGAAAAU<miR-2953-5p>
+CAAUUGCCAUGUGUUGGUAUU<miR-353>
+UGAUUGAGCCGCGCCAAUAU<miR171a>
+AUUGGUUCAAUUCUGGUGUUG<miR869.1>
+AUCCGCACUCUGACUCUCCACC<miR-937>
+UCAGUGCACUACAGAACUUUGU<miR-148a,miR-148>
+UAUGGCACUAUAGAAUUCACUG<miR-183>
+UCUGAGCCUGGGUCAUGCGCGA<miR-H2>
+AAGCACCACGAGAAGCUGCAG<miR-49>
+UAUGUAAUGAUGAUGUAUGG<miR-4112-3p>
+AUGAGCAAAUUAUCAAUUGACU<miR-87c>
+CUGAAGGGUUUGGAGGAACUC<miR395a,miR395b>
+UCUUGUGUUCUCUAGAUCAGU<miR-581>
+AAUCUUAGGGACCAAAUUGACAGC<miR4388>
+UCAAGAUUCCUCGCAAAGGUUCAC<miR-3381>
+UGCGCUUCUGCUCAGCUCGGUGU<miR-1633>
+UGAGCGCCUCGACGACAGAGCCA<miR-339-3p>
+GGUAGAUUCUCCUUCUAUGAG<miR-376a*>
+UGGUCCCCUUCAACCAGCUGUA<miR-133>
+UUGAUUUUAUGGAAUGAUUUAC<miR-3011>
+UCACACCUGCCUCACCCCCC<miR-1228>
+CCCUGUAGAACCGAAUUUGUGU<miR-10b>
+AGUUUUGCAGAUUUGCAGUUCAG<miR-19b-2*>
+GAUGGACAGGGUAUGGGAG<miR-1400*>
+UGGCAGUGGGGACAAGUUUAGG<miR-1487>
+CAAAGCGCUUCUCUUUAGAGAGU<miR-518c>
+UCUGCUUCUGAAACCACCUCC<miR-1415>
+CGCCUGGCUCCCUGCAUGCCA<miR160c>
+UGAUUGUCACCUUUUGGAGUAGA<miR-508-3p>
+UGAGCCCUUUCCUCCCGCAG<miR-1233>
+GCCUUUUCAUGUAAAUUUCCAU<miR-4000a-3p>
+CUAGACUGAAGCUCCUUGAGGA<miR-151-3p>
+CAUUAAUUUGUUCCCCUCCUA<miR4236>
+UACUCAGAUUGGUAUGAGUCA<miR-880*>
+CCACAGGGUAGAACCACGGAC<miR-140*>
+ACAGCAGAUUGAUGGGGCACA<miR-1704>
+UCAUACUUAUUUAUGCUCCUUU<miR-3643>
+UCUCGUGACAUGAUGAUCCCCGA<miR-3601>
+AACUUUACGAUUAUGGACUCAG<miR-2849>
+AGAACAUUCUGAUUCACAA<miR-2176>
+GAGCACCACGCCGAUGGACGGAGA<miR-M21>
+GGAGUGUCAUGAGAACACAGA<miR398a*>
+UCAGAUCUACUUCAUACCCAUG<miR-1174>
+AUCAUCAAAACAAAUGGAGUCC<miR-3071*>
+UGAUUGUCCAAACGCAAUUAG<miR-219>
+CCCUGGGAGGAGACGUGGAUUC<miR-3474>
+UAUUGCACUUGUCCCGGUCUA<miR-92a>
+GACAGAAGAUAGACUUUGGUC<miR3699>
+CAGCCACAUCCGAAAGUUUUC<miR-693-5p>
+UCUAGCAGCUGUUGAGCAGGU<miR780.1>
+GGACUUCCCUGGUGGUCUUGUG<miR-2340>
+GAGCUCCCUUCGAUCCAAUCC<miR159d*,miR159c*>
+UCUGUUGAGUGUUUGCUGUGU<miR-1396>
+CGGUAUACCUUCAGUAUACGUAAC<miR-iab-4,miR-iab-4-3p>
+UGAUUGACACGUCUGCAGGUAGA<miR-509a>
+UGCUCUGAACGAGCUGAGAGGCA<miR-1783>
+AAUGGCGCCACUAGGGUUGUG<miR-652>
+GAUGAGUGACCGUUUAGUUCAA<miR-279d*>
+CAGCCUCUGCUGAUCGUCUUUU<miR-1589>
+UCACUGGUACCAAUCAUUCCA<miR4227>
+AUCACAUUGCCAGGGAUUU<miR-23a>
+UCACCGGGUGGAAACUGGUACG<miR-35e>
+UAACAUUACGAGGAUGGGUUUAGUUA<miR-2771*>
+AGGUAACUGUUGCAGCAUCC<miR-2032b*,miR-2032a*>
+AAAGCAGCGAUGUUCUUCGGCAG<miR-2522a>
+CUGUUGGCAGCUCUCUCAGAC<miR-2395>
+UCUUGAUGAAGAGGAAUGGAA<miR847*>
+GUGGGCGGGGGCAGGUGUGUG<miR-1228*>
+UACCCGUAACGCUUCUACCGAG<miR-56>
+CUGGGUGUUGACUGAGAUGUG<miR-2136>
+CAGUGGUUUUACCCUAUGGU<miR-140*>
+GCACUGGGUGAAGUUUGUCUUA<miR-309>
+AGUCCAGGGCUGAGUCAGCGGA<miR-1956>
+UUCACCUGGUCCACUAGCCG<miR-412-3p,miR-412>
+UGGAAUGUAAAGAAGUGUGUAU<miR-1>
+GUGCAGUUCUCCUCUGGCACG<miR399h*>
+UCGCGGCAGGGAGGUUCACAA<miR3451>
+AUUCCUGGAAAUACUGUUCUUG<miR-145*>
+AUGACAUCACAUAUAUGGCAGC<miR-489>
+GCUGACUCCUAGUCCAGGGCUC<miR-345>
+UGUAGUUUCUAAGACGAUGCUGAC<miR4396>
+GCGAUUGUGUCUGGACAUCU<miR-219*>
+UGAUUGACACGUCUGCAGAUAGA<miR-509b>
+CGUCUUACCCAGCAGUGUUUGG<miR-200c*>
+CUAGCACCAUCUGAAAUCGGUUA<miR-29a>
+AUACUGGCCCACAAAAUUUCUUU<miR-2148*>
+CACAUUAAGGACUCAUAUUGGAG<miR-3043>
+UUACAGCUUCAAUACAGUGGUCC<miR-2514>
+CCAACGUGCAGGGGGACAUGG<miR1148.1>
+AGCUGCCUGAUGAAGAGCUGU<miR-745a>
+UCGACAGCACGACACUGCCUUC<miR-196b*>
+CCUGCUGCCCAAGUGCUUAUCG<miR-252*>
+CCUGUCCUCGGUUACUUGUCUC<miR-26*>
+UCUUUGGUUUUCUAGCUGUAUGAU<miR-9a>
+UGUGCGUAGUAAUAGAGGUAUC<miR-2161>
+AGAUCAUGUGGCAGUUUCACC<miR167-3p>
+GUGCCUGAGGGCUUCGUCCAUGUU<miR-3383*>
+AUUGACACCUCUGUGAGUGGA<miR-514,miR-514b-3p>
+AUAAGCUCGAUAUUUAAAGUGGU<miR-2169-3p>
+UUGUAGUAACGUGAUGGUCAAUGU<miR1864>
+UUUUGAUUGUUUUUCGAUGAUGUUC<miR-1820>
+GGGGGCCGAUGCACUGUAAGA<miR-128-2*>
+AGAUAUUAGUGCGGUUCAAUC<miR171b*>
+ACUCUCUAACCUGACAGAAAACU<miR-1717>
+UUCCACGGCUUUCUUGAACC<miR396>
+UUAGAUGACCAUCAGCAAACA<miR827a,miR827,miR827b>
+AGGGACUUUCAGGGGCAGCUGUG<miR-365-2*>
+UGUGCCCCGUGUAUGCAGUGCA<miR-1562*>
+GCAGCAGAAUAUCCCUGCCAUU<miR-1625*>
+UCGGACCAGGCUUCAUUCCUA<miR166b>
+AAAGCGCUUCCCUUCAGAGGA<miR-518f>
+UAUUGCACUUUUUCUUGCCUCU<miR-2507b*>
+CAGCUCCUGUUUCUCUCCUCAG<miR-2350>
+AUAUACAUACACACACCAACAC<miR-467b*>
+UAGAGGGUCCCCAUGUUCUCA<miR3508>
+GCCGGGUUUGCGGCCGCUUUU<miR-1561>
+AACUGUGUCUUUUCUGAAUAGA<miR-881>
+UCGGACCAGGCUUCAUUCCCCC<miR166a,miR166>
+UGGAGGCCUGGUUGUUUGUGC<miR-78>
+CUGCAUGUGGUGGAAAUGUCUG<miR-2463>
+UUGGACACUAAGUACUGCCACA<miR-3069-3p>
+UCACCGGGUGAGAAUCUUCC<miR-41b>
+AACUUUGUGAUGACAACGAAG<miR3932a,miR3932b>
+CUUCCUGCCUCUCACUAGCUU<miR1219a,miR1219b,miR1219c>
+AAGUCUUUGCCCAACAGCAA<miR-4068-5p>
+AGGUCCAUGACCUCAUGGG<miR1166.2>
+AGGCAGCCGUCGGCAGCGGCAGC<miR-M87-1>
+CGGCUCUGAUACCAGUUGAUG<miR845a>
+UGUGGCUGUGGUGUAGGCCAGC<miR-4331>
+UAAUAUCAGCUGGUAAUUCUGA<miR-216b>
+CGGGAACGUCGAGACUGGAGC<miR-1247*>
+AGAUUGACGAGUGCAAGAAGA<miR2083-3p>
+UUCUCUUCUUCGUGUCGCAUUU<miR2097-3p>
+AGGCAGAUCAAUCAAUUUUUAGG<miR-2210>
+UCAUGCUGUAGGACUUUACC<miR-4156-3p>
+ACAAAGUGCUUCCCUUUAGAGUGU<miR-520h,miR-520g>
+UAGGCAUUCUCGGUGAUACUUG<miR-2512>
+AUAUUACCAUUAGCUCAUCUUU<miR-556,miR-556-3p>
+UGGAAUCACACGGUCGUCAUUC<miR2935>
+CAUGACACUGAAGCGGGAAUGG<miR-65>
+UUUGGAAGCCAGCACUCAAGU<miR-3645>
+CUGAAGUGUUUGGGGGGACUU<miR395c>
+UACUGCUUUUCAGCUAAAGGA<miR-244*>
+UUAACGAAAAAGGACUAACGAC<miR4399>
+AACCGGCUCGUGGCUCGUACAG<miR-BART13*>
+CACGUGCUCCCCUUCUCCACC<miR164g*>
+AGGCGAGGAGAACAGCAGCU<miR-1767>
+UGGUGAGCCUUCCUGGCUAAG<miR1430>
+CACUCGCUUUGGAAGUCAUGG<miR2674>
+GAUUGUGCCCGGACCGUGGGCG<miR-US33-5p>
+AUAUAUACACACACACAUAAGAC<miR-466>
+CAGCCCUGCUGUCUUAACCUCU<miR-349>
+AGGCAGUGUAGUUAGCUAGUUG<miR-34>
+CGGUGCAGGACUCCGCGGCUC<miR-2185>
+AGGGCAAUUCCUGAUAGGUGCU<miR-1736*>
+CCUGGUACGGGGCCGUGGGAGAG<miR-150*>
+CUAUGCCAGCAUCUUGCCU<miR-3554>
+ACCGUGGCUUUCGAUUGUUACU<miR-132*>
+UGAUGUGUGUGUACAUGUACAU<miR-466o-5p,miR-466b-5p>
+AAGCUUCGUGGUCUCUGUCUUGCC<miR-1843>
+ACUCCUUUGUGUAUCUCCGUUUCA<miR-184*>
+AGUGGUUCUCAACAGUUCAACA<miR-203b*>
+AAGAAAUCACUAAUCUGCCUA<miR-7*>
+UGAAAGACCUGUUGGUAGUGAGACG<miR-71>
+UAAGUGCUAUUUGUUGGGGUAG<miR-430a>
+UCCCUGGAGUUUCUUCUU<miR-4308>
+UGUGGAUGUUGCUUGCUGGAU<miR1169>
+GAGUUCUACAGUCAGAC<miR-3168>
+UACCGGGCCAGCUGGAAGGAGA<miR-2474>
+AGCAGGUCACGUGUGGUGCAG<miR-1421z>
+AAAGACGUAAAUGUUACCUGCG<miR-3029>
+CUGAAGUGAUGCAUAACCGAUCAG<miR-573>
+AUCCGUGCUGAGAUUUCGUCU<miR-3492>
+AAGUGAUCUAAAGGCCUACAC<miR-1245>
+CUAUACGGCCUCCUAGCUUUCC<let-7e*>
+CAUAUACAUACACACACCUACA<miR-467a*>
+UACCCGUAAGCCAUUCUGUCGAG<miR-55a>
+GUAGAUUCUCCUUCUAUGAGUAC<miR-376a*>
+UUCGUUGUUUAUGAAUGAGAGA<miR-76>
+AGCGCCACCGGACGGGGAUUUAUG<miR-K12-7*>
+UGGAUGGCUCCUCCAUGGCU<miR-432-3p>
+GAGCUUGGAUUGUGAUCUCA<miR-753>
+UUUUCUUGGCCCAUCCACUUC<miR3440b-5p>
+GGCGGGUGGUUGUUGUUAUG<miR-264>
+UUAUGUCUUGUUGAUCUCAAU<miR863-5p>
+UAUGUAACACGGUCCACUAA<miR-411*>
+UGGGCUGCAUCAGUCAUGCCAUG<miR-1791*>
+GUAUUAUGCAAAUAUUCACAAU<miR-2162-3p>
+GCUGAGAGGGCUUGGGGAGAGGA<miR-2954*>
+UUUGUGACCUGGUCCACUAACC<miR-758>
+UGCUGGUCAAACCGGUGGUGG<miR909.1>
+GAUGAUGCUGCUGAUGCUG<miR-1322>
+ACACCUGAAACAAAACGCAA<miR-2048>
+AUCCAGUCUGUUUUGGCAUCUGA<miR-M16>
+UAAGAUGACCAUCAGCGAAAA<miR827>
+AAAAGACCACCGGUUACACUACA<miR-2209c>
+GCAAUGCAGACUCCAGGGCCC<miR-2333>
+AGAAGAGGUACAAGGAGAUGAGA<miR831*>
+CCCAGUGAUGGAGAGGUCUGAUC<miR-2375>
+UAUUGCACAUUCACCAGCCUGA<miR-311c>
+UGCCACUCUUUUAGCUUCCGAAUC<miR3446*>
+ACAAAAAACGUGGGUCAC<miR-4105-5p>
+CUGCCUCUUUGCUUCAGGAAU<miR1096>
+UGUCUGGGAGCAGCCAAGGAC<miR-3075>
+GCCGUUCUUUGCAAGUUUUGUU<miR-4000h-3p>
+ACGUAUUCGUUGGAGCAUUUU<miR-277a*>
+UCCGGGGCUCAUAACCUGUUG<miR1151a>
+CACAGAACAUGCAGUGAGAACU<miR-1912>
+CUCAGACAGAGAUACCUUCUCU<miR-717>
+UGUGGAGGUGGGAUGAGGUUCC<miR-1706>
+GUAGUUUUUGGUAUCAGGAU<miR-125a*>
+UGGAGAAGCAGGGCACGUGAG<miR164e>
+CCUGCAUUGUACACACUGUGUG<miR-460a,miR-460>
+CAGUGCAAUAUUAAAAGGGCAU<miR-130,miR-130a,miR-130c>
+UCUUGUCAAUGUUUAGGGGCA<miR904a,miR904b>
+CUGACCUAUGAAUUGACAGCCAG<miR-192>
+UCGCUCAUCGUUAUUUGAUAGU<miR-2560>
+AGGCAGUGUGAUGUUUGCUGG<miR-449b>
+UAUUGCACUCGCCCCGGCCUG<miR-235>
+AGUAUGCCCACUACCUAUC<miR2932>
+UGAGCUUACGAAUCAUCAGCCAUU<miR-2703*>
+UGAUCUAGCCAAAGCCUGACUGU<miR-344>
+ACUGAAAACACUACAACCCCU<miR4235>
+GCGUACAAGGAGCCAAGCAUG<miR160c*>
+UUACAUAUGGUUAUUACGUCACUAG<miR-3305>
+UGGAUUGAUCCCAGCCAGGC<miR912>
+GGUGGUGCAGGCAGGAGAGCC<miR-3102-5p.2>
+CAUACACACACACAUACACAC<miR-466f-3p>
+AAAUCUACCUGCCUCUGCCU<miR-1196>
+GGAGCACAAUAUGUAGUUUA<miR-4033-5p>
+AAGUGUACCCGAAUCUGAUAUCC<miR-2208a>
+UUCGGGCUGGCCUGCUGCUCCGG<miR-3944>
+UUAAAGGGAAUUUGCGACUGUU<miR-724>
+AUGCACUGCCUCUUCCCUGG<miR408>
+CUUCUCUAACCGAUACUGCAUG<miR-2806>
+UACGGUCUUGGCUCGCCGCAG<miR3467>
+AAGGUCCAACCUCACAUGUCC<miR-2188>
+UCACUGGGAAUGUAAUGACUAU<miR-2733i>
+CUAUACAAUCUACUGUCUUUC<let-7a*>
+UUCAGAUCCUCAAAUACAAUAUG<miR-2517b>
+UUGCAUGGAGUCUAUGUCUGGA<miR538a,miR538c,miR538b>
+ACUGCCCCAGGUGCUGCUGG<miR-324-3p,miR-324>
+CGUCUUAGCCCACAAAACGAA<miR1035>
+UAUUGGUGAGGUUCAAUCCGA<miR171n*>
+CGUCUUACACUGCUGUGCUAC<miR-2030>
+AUGGUUGACCAUAGAACAUGCG<miR-380,miR-380-5p>
+UGUGACGCCGUUGACUUUUCAU<miR1884a>
+GGCAAAAACCACAAUUUCUUUU<miR-548d-5p>
+UGGACAGAGAAAUCACGGUCA<miR3954>
+AAGUGCCGCCAUGUUUUGAGUGU<miR-292,miR-371-3p>
+AGACUAUAGAGAUUUUUGCUAU<miR-2179>
+UCCCUGAGACCCUAAAACGUG<miR-125-5p>
+UGAGGAUGGAUAGCAAGGAAGCC<miR-3605-5p>
+CAGGCUGCUCUGUGCUUGGCU<miR-2381>
+CUUGUGAUCUUUCGAGGGUUGUA<miR-2685*>
+AUGGCUAGAGUGACUAGACCCG<miR4240>
+UGGCAGUGUUGUUAGCUGGUUG<miR-34>
+AAAAGUAAUUGCGGUCUUUGGU<miR-548j>
+GCGUUGGCCUGCUGGCCGGUG<miR1082a>
+UGGCAAGAUGUCGGCAUAGCUGA<miR-31a>
+AGUUCUUCAGUGGCAAGCUUUA<miR-22-5p,miR-22*>
+AGAUAUGUUUGAUAUUCUUGGUUGUA<miR-190>
+CCUCAUACUAAGUCUUUCCCG<miR-71b-3p>
+UACCUUUUACCUUUACCACAGA<miR-3223>
+CUUGGCACUGGCGGAAUAAUCA<miR-96a>
+UGAUAUGUAAUCUAGCUUACAG<miR-62>
+AACCCUGUAGAUCCGAGUUAGAU<miR-10a-5p>
+UGUGCAAAGCCCUAACAUUUCUA<miR-1477>
+AAGACGGAUGAUUAAAGUUGGACA<miR812g,miR812j,miR812h,miR812i>
+UUUAUUCUCAGUUUGUUGCUC<miR2634>
+UAUUUUAGUUUCUAUGGUCAC<miR2871a,miR2871b>
+GGUCCAGAGGGGAGCUCGA<miR-198>
+CAAGAUGUGCAUAUGUUGAGUGA<miR-3426>
+AUCCUUGCUAUCUGGGUGCUA<miR-502,miR-502-5p>
+UAUGGAUGGAGGUGUAACCCGAUG<miR1874-3p>
+ACCUGGCCGAUUUCAUGUAAUAU<miR-246>
+GUUCAGGUAAUAGAAAUGUAC<miR-2702*>
+UUGUCUGCUGAGUUUCC<miR-4288>
+GCAAGGACAGCAAAGGGGGGC<miR-211*>
+AGAAUCUUGAUGAUGCUGCA<miR172a,miR172b,miR172c,miR172f,miR172d>
+UAGGGCAGAAUGAAGGAGUCCCU<miR-1659>
+UUAUUGCUCGAGAAUACCCUU<miR-234>
+CAUUAUUACUUUUGGUACGC<miR-126*>
+UCCGGACCAGGCUUCAUUCCC<miR166l,miR166k,miR166j>
+UCGGGGAUCAUCAUGUCACGAGA<miR-542-5p>
+UCUUAAUAAUUUCUUAACGAUUUG<miR-3429>
+AGGCGGGGCGCUGCGGGACCGC<miR-663>
+ACACACAGUCGCCAUCUUCGA<miR-672*>
+UAGGUCACGUGUGGUGCAGCAU<miR-1421x>
+AUUGGAUUGAAGGGAGCUCCU<miR159e>
+UUUUUCAUUAUUGCUCCUGACC<miR-335*,miR-335-3p>
+CCUGAGCCAGGGACGAGUGCGACU<miR-H2>
+CCAGCGCUGCACUCAAUUACG<miR397b*>
+ACACUUACCUGUAGAGAUUCUU<miR-216b*>
+GUGGUUCUAGACUUGCCAACU<miR-182*>
+CUGGCUGGGGAAAAUGACUGG<miR-664*>
+UCUGGUCUUUUACCUCUCCCUGG<miR-3357>
+AUGCACUGCCUCUUCCCUGGC<miR408-3p,miR408>
+CCUCCCAUGCCAAGAACUCCC<miR-2116*>
+UUAAUGUAUUAUAUGAUUGU<miR-4215-3p>
+UGGUAUCGUUCUUUAAUCAACA<miR-2792-5p>
+GGUUGGGCAGUGAGGAGGGUGUGA<miR-3147>
+CUUCCAUCGGAGCUCGUCAGA<miR3454d*,miR3454g>
+CUAUACAAUCUAUUGCCUUCCC<let-7f-1*>
+UUUUGUAUGAGACGCAUUCCG<lsy-6>
+CAACAGCAGUCGAUGGGCUGUC<miR-21*>
+UGCGGGAUCUUUAGUUGUGGUG<miR-3432>
+GUGAGGGCAUGCAGGCCUGGAUGGGG<miR-1226*>
+GACUAUGAUGAGAUGUUGG<miR-4088-5p>
+CAUCUUACUAAUAGUAUUUGA<miR-8-5p>
+CAAAUUCGGUUCUAGAGAGGUUU<miR-10,miR-10*,miR-10-3p>
+AGGGUUGUUAGUUGUGUUGAU<miR1074>
+GAACUGGCAGGUCCAACCUGGCGCA<miR-3311>
+CAUCAAUGAAAGGUAUGAUUCC<miR1885>
+ACACCUGGGCUCUCCGGGUAC<lin-4*>
+UCAGCUGGUCUUGGGUAAAUGC<miR-1655>
+UCCUGGCUCUCGGCUCUAUAUG<miR-2544*>
+CAUCACAGCACGAUUCGGCUC<miR-2c>
+AUACUAAGUACACUACGUUUUC<miR-728>
+UGCUUUGAUUUGUAAGCUCAGC<miR-2703>
+CUGUGCGUGUGACAGCGGCUGA<miR-210>
+CUCCUGCGUCGGCCCGAGGCC<miR-M23-1-3p>
+GGGGCCUGGCGGUGGGCGG<miR-2861>
+UCUUGGAGUAGGUCAUUGGGU<miR-432-5p>
+CCCUCAAUGAUGUUUUGAAGC<miR3441.1*>
+CCGUUCGAGAAGCAAGACAAAGUG<miR-3333>
+UGAUUGUAGCCUUUUUGAGUAGA<miR-508,miR-508-3p>
+GAAGGAACUUCUGCUGUGAUCUGA<miR-2944a>
+CAAGAUUGGUAACCAACACUAA<miR-4003b-3p>
+AACAUCCUGGUCCUGUGGAGA<miR-697>
+AGCUCUUUUCACAUUGUGCU<miR-130a>
+AAGCACCAGUUGAAAUCAGAGC<miR-29>
+CUACCUUUGAUAGUCCACUGCC<miR-3061-3p>
+UGUGUGAAGUAGAGGAAC<miR-4108-5p>
+UAUAUGUGUAUUGUUGGUGUGUG<miR-1657>
+CAUCCAUCUUAUCAUUUAUCAA<miR-756*>
+CCCAGUGUUUAGACUACCUGUUC<miR-199b*>
+CCUUAGGACAGACGUCAUGUAG<miR4362>
+UUUCGGUAAUUAUGGAAAUGUUCAA<miR-3360>
+AGAGUCUUGUGAUGUCUUGC<miR-924>
+UAAGCAACUUUCCUUUCUCCA<miR-2370*>
+CGAGGUCACAUGUGGUGCAGCA<miR-1421b*>
+CGUAGGGCCGUGGGACGGCA<miR-1583>
+UCCUCGUUACUGAAGUUCA<miR-2033*>
+UAUGGCUUUCUAUUCCUAUGUG<miR-135a,miR-135c>
+CAUUGUUUGGAUAAUAAUUUG<miR2676a,miR2676f,miR2676d,miR2676c,miR2676e,miR2676b>
+UCAUUGAGUGCAGCGUUGAUGU<miR397a,miR397b>
+GUCGUUACCAACAUGUUUUAC<miR-4006a-2-3p>
+ACGUGGAUGUGGACUUGAUA<miR-4087-3p>
+UACCCGUACUUCCAACUUCC<miR-54c>
+UUCACCACCUUCUCCACCCGGC<miR-197>
+UCGGACCAGGCUUCAUUCCUU<miR166o,miR166n,miR166q,miR166b>
+AGGAAAAUACUGUCUUGAAUGA<miR-1422m*>
+AGGCCUUGGCCGAAUGCAUAUAUU<miR-235*>
+UUUGUUCGCGUUGCUCAACCAC<miR-356>
+CUGGCUGGGGAAAAUGAUUGG<miR-664-2*>
+ACUUGCUGUAUGAAAUUGGCGAC<miR-2782>
+GUGACUGUACUUUAAAAGGUUA<miR-2380>
+AGGCAGAUGUUGGCAUAGC<miR-72>
+UAUUUUCUGCAUUCGCCCUUGC<miR-BART2-5p>
+CGAGCCUCAAGCAAGGGACUU<miR-2114*>
+CCAUCGUGCCACGUUACGAUCC<miR2625>
+UCUCAAACUAUGGGGGCA<miR-290>
+CCUGAACUAGGGGUCUGGAGGC<miR-345-3p>
+CUUGGCACUGGAAGAAUUCAC<miR-263b>
+CCCACCGGGGGAUGAAUGUCA<miR-181d*>
+UAAUCUCAGCUGGCAACUGUGAG<miR-216>
+AGUUUCUCUGGGAAAGCUAUCGGC<miR-1822*>
+AUCCUCGGGAUACGGAUUACC<miR2111b*>
+GGCAAGUCAUCUCUGGCUAUG<miR169c*>
+UUCAGGGUCAAGUUUGCAUGC<miR909.3>
+UGUGUCACUCGAUGACCACUGU<miR-597>
+CCUUAGAGUCGUAGGCCUCUG<miR1218>
+UGGAUUUCUCUGUGAAUCACUA<miR-876-5p>
+UCAGCAGUUGUACCACUGAUUUG<miR-1992>
+ACCAUCGACCGUUGAGUGGACC<miR-181c*>
+UUCCUGUAUCUGAUUUUCAG<miR-2565>
+GGAAUCUUGAUGAUGCUGCAG<miR172h,miR172c,miR172g,miR172>
+UUCCGCCCUGCAAGCCCGGUA<miR-1549>
+UUUAAGGUACAGACUUUGAGUC<miR-2509>
+CCAGCUGGGAAGAACCAGUGGC<miR-763>
+CAUGGUGCCGGUUCCGGUGGCG<miR2102-3p>
+UACCAACUUAGACUGAGUUAU<miR-2e-5p>
+CGUAGAAUCUACCAUCGGAUCG<miR-2808a>
+UUCACUGGGGUUUGUUUCACUA<miR-653*>
+CUCCAGAGGGAUGCACUUUCU<miR-525-5p,miR-525>
+CUCCAGAACACGUCAAGAGAG<miR-2248>
+AAGGGUGUUAAAUGAAGACUUAU<miR-2780a>
+UAUUGCACAUGUUGUACCAA<miR-4009a-3p>
+CAACAAUCUAUGGUCUCCUGC<miR-7*>
+GUGCGGCUCUCCUCUGGCAUG<miR399i*>
+UUGCUUUUUAACAAGUUUCACUA<miR-3031>
+CUAAGUACUAGUGCCGUAGGUU<miR-252a>
+UUAAAUUGUAAAAAAGCGUGGGUU<miR-3247>
+GGUUCAAGUGAACAGGAAGA<miR1051-5p>
+UGACAGAAGAGAGAGAGCAU<miR156h>
+GAACGGCUUCAUACAGGAGUU<miR-337-5p>
+AUUCCUAGAAAUUGUUCAUA<miR-384>
+AACACUUGGUAAUUUGCUCAAACC<miR-87a-5p>
+UCUUUCCUACUCCUCCCAUACC<miR482a>
+UGUAAACAUCCUACACUCAGC<miR-30b>
+UAGCUUAUCAGACUGAUGUUGACU<miR-21>
+UGCUGUGUCCUCACUCACCUU<miR-1668>
+AUAUACAUACACACCCAUAUAC<miR-669d-2*>
+UUCGUUGUUGAUGAAGCCUUGA<miR-76>
+UCCCUGUGUCCCCUCGGUGGCA<miR-1652>
+CUUAGCACGUUGUAUUAUUAUU<miR-374*>
+CAUGAAAACACCAAACAUGU<miR-4143-3p>
+GUGCAUUGCUGUUGCAUUGC<miR-33b>
+AUGAAGGUCUGCAUCGUAGC<miR902d-3p>
+UUGUCCCCUUCAACCAGCUGU<miR-133a>
+UUCCUGAUGCCUCCCAUUCCUA<miR2118m,miR2118f,miR2118j>
+AGGCUGCUGGAGAAGAUAUUUU<miR-2379>
+UUCACAGUGGCUAAGUUCUUCA<miR-27d>
+AAGUGUUGUCCGUGAAUGAUU<miR-3592>
+GAGGUGAGCCGAGCCAAUAUC<miR171g,miR171c>
+UCCUGAAGGGCUAAUUCCGCU<miR-1395>
+ACCGGCUGCCUCGGUGGCAC<miR-1621>
+ACUGCAUUAUGAGCACUUCAAGU<miR-20a-1*>
+AGACCUGGCUUAGACCUCAGC<miR-631>
+UAGCCUUCAGAUCUUGGUGUUUU<miR-3614-3p>
+AAACGUAAACAUAUAUAAUCGA<miR4237>
+UCUAACCGCACCGUCCCCCAG<miR-1235>
+CUCGGAAGCUAGACGUGUGGCAGG<miR3446>
+AGGACUGUCCAACCUGAGAAUG<miR-1388*>
+CAAAAGAGCUUAUGGCUUGUA<miR1516>
+UCGGACCCAGGGGGACUGCGGU<miR-2413>
+UAUGCAUUGUAUUUUUAGGUCC<miR-586>
+GGGCUCACAUCACCCCAU<miR-4284>
+AGGAACUAGCCUUCUCUCUGCU<miR-298*>
+CCUGAAGUUACUAAUCCUUCCA<miR2632c,miR2632a,miR2632b>
+UGCAGUUUGCAGUUGUGGCAC<miR1847.1>
+AUCCUAUCUGCUGUGGUUUAUG<miR-2543a*>
+AAUGACAGAACAGUGCGCGAG<miR-2238e>
+AAUGGUUCUGACAGCAUGACC<miR-M4*>
+UUUUGGAAGUUUGUCCUUACG<miR426>
+GCCCCCGGUCCCUGUAUAUA<miR-H8*>
+UACAGAUUGGUGUUAGUGCUU<miR1087>
+UAUGUGUGUGUACAUGUACAU<miR-466p-5p>
+AACGACUUCAUCUUCUUUGCU<miR3441.2>
+AUAAGUGGGUUUGUGGGCUGGCCC<miR1876>
+UGGUGGGCACAGAAUCCGGACU<miR-541>
+UCCGGUUCUCAGGGCUCCACC<miR-671-3p,miR-671>
+UGAAGUUAUGAAGUCAGGAUA<miR-3377>
+CUCAAGUGAGGUCAGUGCUGCU<miR-1996a>
+AGAGAUACCUCCGGAGAAGCG<miR-967>
+UGGGGUUCUACAAACCGAACU<miR2872>
+UGUUGUCUCAAGCUUGCUGCC<miR444c.1,miR444b.1>
+UGGGGGCGCUGCAGACACGGAUG<miR-2433>
+AGCUAAUUAAGGAUUCUACAC<miR1036-3p>
+GAUGCUGCUGCUGAUGCU<miR-1322>
+UAAUACUGUCUGGUAAUGCC<miR-429>
+CCUGUGAAGUUUAGUUCUUCAG<miR-146a>
+UUCUGAGCUGAGGACAG<miR-4303>
+AGACGACGUCUGGUGAUGCGAUG<miR-2717>
+UAAAUUAAUCACGGAAAUGAU<miR420>
+GUGGGUACGGCCCAGUGGGGGG<miR-1225-5p>
+UAACUGCAACAUCUCUCAGUAU<miR-883b-3p,miR-883>
+UGGUCUUUGUUUGCGACCCAUACG<miR851*>
+GCUCUGACUUUAUUGCACUACU<miR-301b-5p,miR-301-5p,miR-301a*>
+AAGGGUGUUAAAUGAAGACUUAA<miR-2780b>
+UUGCGUAGGCAUUGUGCACAGU<miR-242b>
+CAUAGUGAGGUACGUGUAGG<miR-M29-3p>
+CUCAGAGCUGUGGUCCCAUGGU<miR-1746>
+GAGUGUAACCGCACGUCUUGUUU<miR-2209c*>
+CAAAAGUUGCUGGGUUUGGCUGGG<miR474a>
+CCUGGCAAUACUGAGGUUGUGU<miR-875*>
+CUGUAUGCCCUCACCGCUCA<miR-675b,miR-675*>
+UAGACUGUGAGCUCCUUGAGG<miR-151>
+UCAGGUACCUGAAGUAGCGCGCG<miR-275>
+UAGCCAAUGGGAAUAACAGAU<miR2648>
+UGAUGCUGGGAAAUGUAGUUCUGG<miR-1344>
+CGUCUGGGAUGGCAUUUUGGC<miR1851>
+CUCAGUGACUCAUGUGC<miR-4276>
+UUUCACGGUUAUGUUCGAAG<miR917>
+CACAGUGGUCUCUGGGAUUAUG<miR-216a*>
+UCACAGCCAACCUUGAUGAGCC<miR-2b>
+ACAGAUUCGAUUCUAGGGGAAU<miR-10b*>
+UCACCGGGUGAAAAUUUGCAAG<miR-35d>
+GGCUUGUUUUAAGUUGCCUGCG<miR-1788>
+CGCCUGGCUCCCUGCAUGCCG<miR160d>
+AAUGGCGCCCUUCUGAGUAGA<miR-506>
+UAAGUUAAGAUUUGUGAAGAA<miR1888>
+GAGCGCACGAGCGAAAAGG<miR-4169-3p>
+GCAGCUGUAGGAGCCAGUGAUGG<miR-2969>
+UGCCAUUUUUAUCAGUCACUGUGA<miR-1985>
+AAUCACAGGAUAAUACUGCGAG<miR-308>
+UGACUUAAAUGGGAGCAGAAUU<miR-1784>
+CUUAUCGCUAUAUUCCAAUUAAUGU<miR-3285>
+CGCCUGCAUCUUUACAGCUU<miR-4062-5p>
+UGGUUAUCCCUGUCCUCUUCG<miR-487b*>
+CAAUUUAGUGUGUGUGAUAUU<miR-32*>
+UAUGUGCCCUUGGACUACAUCG<miR-455,miR-455*,miR-455-5p>
+GCAGCCCCUCCGUCUGACUCAG<miR-2466-3p>
+GAUAUAACCACUGCCAGACUGA<miR-344d>
+UUGGGACAUACUUAUGCUAAA<miR-1302d,miR-1302>
+AUCUCCCUCAAAGGCUUCCAA<miR477>
+UGCAGUUGCUGCCUCAAGCUU<miR444e,miR444d.2,miR444a.2>
+GUGGCUGUCCCUGGAGGUGGG<miR-2902>
+UGUUGGUGAGAGUUCGAUUCUC<miR1918>
+GCAGCAGGGUGAAACUGAGACA<miR-761>
+UCACCGGGAGAAAAACUGGAGU<miR-38>
+ACUCAAACUGUGUGACAUUUUG<miR-293*>
+GAGGGGACCGACCCCCAGUCGC<miR-1343>
+UGAAACAUACACGGGAAACCUC<miR-494>
+UCAGGGUUUGGGAUUCAGGUGC<miR-2472>
+GAGCUGUUCACGAAGUUUUA<miR-4000f-3p>
+GAAAGCGCUUCCCUUUGGAGUG<miR-518a-3p>
+CCAGACAGGGAGAGAACAGG<miR-1664*>
+AAAACCUGAACGAACUUUUC<miR-2312>
+UGGUGUGCUCGUUUGGAUGUGG<miR-1541>
+UGAUUGAGCCGUGCCAAUAUU<miR171c>
+CACAUUACACGGUCGACCUCU<miR-323,miR-323-3p>
+UAGCAGCAUGUAAAUAUUGGAG<miR-16c>
+GCUCACCUCUCUUUCUGUCAGU<miR156b*>
+UUUUGCGAUGUGUUCCUAAUA<miR-450a>
+GCCCUGCCUGGGUCACCAUGUGA<miR-789>
+UCCCUGAGACCCUUUGAUUGCC<miR-125a>
+UGAACUGGGUUUGUUGGCUGC<miR3476>
+GAUGAGCUCAUUGUAAUAUGAG<miR-556-5p>
+GGAUACAUUCAGUAUACGUUUA<miR-iab-4as-3p>
+GAAAGAGAGCUGAGUGUG<miR-4311>
+ACAGAGUUCCGUAGACCACGG<miR402*>
+AUGGGUGAAUUUGUAGAAGGAU<miR-1262>
+UUCCCAGCUCCGACGGAAUGG<miR3454e>
+UGACUGUCUGGACACAGUAGUUU<miR-3505>
+GGAGGGGUCCCGCACUGGGAGG<miR-1914*>
+AUCCGCGCUCUGACUCUCUGCC<miR-937>
+UGUAUUGGAACACUACAGCUC<miR-1805-3p>
+UGGAAUCUUGAUGAUGCUGCAG<miR172c>
+AUAAGACGAACAAAAGGUUUGU<miR-208b>
+UAUUGAUUUGGUGGAUUUGAAAA<miR-2517a>
+CCAAGCACUUAUCGCACCCUG<miR1076-3p>
+GUUCGGGAUUCUGGGACGAGG<miR3462*>
+ACUUGGAGGAGGCCACUGGC<miR1158>
+UAGCCAAGGAUGACUUGCCUA<miR169c,miR169m,miR169r,miR169e,miR169h,miR169,miR169f,miR169x,miR169g,miR169a,miR169d,miR169n>
+UGUUUCCUAUCCAGGCAGCACU<miR-1571>
+AGAUAUUGGUGCGGUUCAAUC<miR171c*,miR171c>
+UUAAGUAGUAGUGCCGCAGGUA<miR-252b>
+AUUAUGUCCCACACAUGCCUC<miR3635*>
+UGACUAGACCCGUAACAUUAC<miR4240>
+UUUGUACUGCACAAAAGCUCUG<miR-239b>
+UGAGAAGAUCCGGUGAGUAACU<miR-2808e>
+AGUGGUUAUCCCUGUCCUCUUCG<miR-487b*>
+CAGUAAGUGCUUAAUAAGGAAU<miR-1377>
+GUGGGUAUCUGGAUGUGGUUGG<miR-1003*>
+CGUGGUAUUAUUCUUGUGAAUGU<miR-308*>
+UCGGUUAUCAUGGUACCGAUGCU<miR-101b*>
+AAGCUGGGGGAUGGGCAAUACU<miR-311*>
+AGUGGUUCUUGACAGUUCAACA<miR-203*>
+AACCAGAUGGAAACGAGGAGG<miR-2265>
+UUCCCACGCGUUAUAGUGAAA<miR438>
+CACAAUGUUUCAACUAACUCGGC<miR-84*>
+UUUGCUUCCAGCUUUUGUCUC<miR773>
+CAUAAUGGAGGUUUUUUACU<miR-4182-5p>
+CACUUAUCUCAACCCUAGUGA<miR869*>
+CCCCCAGGUGUGAUUCUGAUUUGC<miR-361-3p>
+CAGGAGCUGUGCUGCAUGCAGG<miR-1653>
+AGGGAAUCGGGUGGAGUGCAU<miR1023e-3p>
+UGGGCGGAGCGAAUCGAUGAU<miR-1832>
+AUCAUCGUCUCAAAUGAGUCUU<miR-136*>
+UUCGGUGAUAGUAACCCGUUGAGU<miR-3301>
+UCUUUCCAAUUCCUCCCAUUCC<miR482>
+AACGCACUUCCCUUUGGAGUGU<miR-521>
+AUGUAUGUGUGCAUGUGCAUGU<miR-297a>
+GGUGUGAGUGGAAGUCAGAGGU<miR-1673>
+UUACCAAAUUGCACACUUAAC<miR-3003a-5p>
+GGAGACGCGGCCCUGUUGGAGU<miR-139-3p,miR-139>
+UGAUUGAGCCGCGCCAAUAUCU<miR171g>
+UGAGGUAGGCUCAGUAGAUGCGA<miR-48>
+UAACAUGAUGUCAGGAUUUCCC<miR-1667>
+CGACAACAACAACAAGAAGAAGAG<miR1134>
+UUCACUACUAGCAGAACUCGG<miR-726>
+GAGGGCGGGUGGAGGAGGA<miR-3141>
+GCCAGAUGAUGGGAGCUGAUU<miR-2459>
+UAGGCAGUGUCAUUAGCUGAUUG<miR-34b*>
+GAGUUGGCCACCUGGGUGAG<miR-571>
+GACAGUCAGCAGUUGGUCUGG<miR-2970>
+AUAGGACUCAUAUAGUGCCAG<miR-3117>
+UAUCACAGCCAGCUUUGAGGAGC<miR-2b>
+CGGUCACUCGUCUCGAGUCACC<miR-m107-1-5p>
+UAUUCGAGACUUCACGAGUUAAU<miR-2942>
+ACUGAAGUAUACGAUGUUUA<miR-4136-3p>
+CCAGGCCUGCUGGACCGACGC<miR-2415>
+UGGCAUUGUAGGUUUAAGAGC<miR1028c-3p>
+UUGUCUUACCCAUUCCUCCCA<miR1510a*>
+UGUUUCCUGGGGCUUCCCUGU<miR-1374>
+GUUUACAUUGCAUGCACUUA<miR-4029-3p>
+GUGAGCAAAGUUUCAGGUGU<miR-87>
+AAGGGGAGACGGUGGAACUUAU<miR-2343>
+UGAGGUAGUAGAUUGAAUAGUU<let-7k,let-7e>
+UAAGUGCUUCCAUGCUU<miR-302e>
+AACAUUCAUUGCUGUCGGUGGGUU<miR-181b>
+UUGGGGAAAAAGAAGAGUUCAC<miR-1404>
+CCAGUCCUGUGCCCACCACCU<miR-1910>
+GGUCAUUUGAGAACUGUGAUG<miR3433*>
+CAUCUUGGAGUACUGCAUCUU<miR1063e,miR1063a,miR1063g,miR1063h,miR1063f,miR1063c,miR1063b,miR1063d>
+UGGUGGUCGGUGUUUCGUGGA<miR-2021>
+AAUGACACUGUCGCGUAUUGGU<miR-2268>
+CCUAAUUCUUGAAAGUCAAC<miR-1502a-3p>
+AAGCUCUUCCUCAAAAUUU<miR-4216-5p>
+UCUUCCCUACACCUCCCAUAC<miR482a,miR482b>
+GCUAAGACUGAUAAAAGCAAGC<miR-1651>
+UUCGGUUUUGAAGGGUGGCGUAAC<miR-3287>
+AGCACUGGAGUAGCCAAGAGA<miR1855>
+AGAGGGUGCUCAUGAACUGCUC<miR3693>
+GCCCAAAGGUGAAUUUUUUGG<miR-186*>
+CAGUCCAAUAGUAUUGUCAAAGC<miR-301>
+GGCAGUCUCCUUGGCUAUU<miR169h*>
+GGUGGGGUGGGGGGGUUGG<miR-2888>
+UCGACAAGGUGGUUGUGACAUG<miR-2b*>
+AAACAUGGUUCCGUCAAGCAC<miR-218-1*>
+UGAGAGAUGCCAUUCUAUGUAGA<miR-741>
+UUCUGAUAGACACCGGCUCUGC<miR2620>
+UAUUGCACACUAAUGUACCCU<miR-4009b-3p>
+AGCAGAAGCAGGGAGGUUCUCCCA<miR-298>
+GCUGAACCCUAGAGCCUGGCA<miR-2977>
+UAGUAUGCUGCUGUCUUUAGA<miR3624*>
+ACGUUGGUCGCACGAUCAAA<miR-375-5p>
+UAUGGCUUUUUAUUCCUAUCUG<miR-135b>
+AUCGUUGCUCGGGUCGUUGU<miR-2569>
+UACCCUGUAGAUCCGAAUUUGUG<miR-10,miR-10a,miR-10a-5p>
+AACUAUACAACCUACUACCUCA<let-7-1-as,miR-3596a>
+UUUCCUACCCUACCUGAAGACU<miR-3685>
+AGAGUGUUGCUCUCAUCUCU<miR-609>
+UGGUGCGGAAAGGGCCCACAGU<miR-675,miR-675-5p>
+AACUGGCCCACAAAGUCCCGCU<miR-193,miR-193a,miR-193b>
+UCAGAGUUUUGCCAGUUCCGCC<miR1311>
+AUCGUGUCUGCAAGUUUGCU<miR-4147-3p>
+UUCAGUUAUCAGUGGAGUUUGG<miR-1712>
+GCUGAUAGUGAGCGACUGGGGCAG<miR-2291>
+UGGAGAAGCAGGGCACGUGCU<miR164d,miR164f,miR164b>
+UCCCGACAUUAAAUUCUGGGC<miR2869>
+UAGCACCGCUAUCCACUAUGUC<miR-rL1-6,miR-BART1-3p>
+CCAGUGGGGCUGCUGUUAUCUG<miR-194-2*,miR-194*>
+UGAUUACACGGAAGGUUCUUUU<miR-M1-10>
+CGGAUGAGCAAAGAAAGUGGUU<miR-1255b>
+UGUGACUGGUUGACCAGAGGG<miR-134>
+GUUGGGACAAGAGGACGGUCUU<miR-3122>
+UCUAGGCUGGUACUGCUGA<miR-645>
+UGGAGGCUGUGCGUCAUCCCCA<miR-1686>
+UGAGCCAAAGAUGACUUGCCG<miR169o,miR169m,miR169i,miR169n>
+AGGGGCUGGCUUUCCUCUGGU<miR-185*>
+GUUAAUGGCACUGGAAGAAUUCAC<miR-263a>
+UGCAACAAUAUUUCAUCAGUGG<miR-2062>
+AGCCUGGAAGCUGGAGCCUGCAGU<miR-1254>
+CUGUUACCUGAGGUGUCAUGGC<miR-64d*>
+UCACCGGGUGAAAAACUCCCA<miR-41>
+GAAACAGCGAACGGAUCACCUGAU<miR-2809>
+AAAAGCUGGGUUGAGAGGA<miR-320d>
+UCACACACAACCACAGGAAGUU<miR-2004>
+GCAAUUUAGUGUGUGUGAUAUU<miR-32*>
+UCAGGUAUGAUUGACUUCAAA<miR864-5p>
+GAUGUAACCCAACGCAGCAUGA<miR-1397*>
+UUAAGUAGUGGUGCCGCUCUUAUU<miR-251>
+UAGGACUGUGCUUGGCACAUAG<miR-3169>
+UUGAGAAUGAUGAAUCAUUAGG<miR-580>
+GGUCCAGAAGGGAGCUAGG<miR-198>
+CAAAACCGGCAAUUACUUCUGC<miR-548c>
+UAACUGACCUGCUGUGAACUGGC<miR-1936>
+CUAACCGUAACUUUGAAGUGCU<miR-2336>
+GAUAUAACCAAAGCCUGACUAU<miR-344e>
+UCAGCUGACCUGGGCCUGCAGUG<miR-1691>
+CUUGUGCGUGUGACAACGG<miR-210>
+CCCGGGGCGCCCGAGGGG<miR-1394>
+GGCGGACGAUUGAGGAGAAGUU<miR3453*>
+UAAAGCUAGAUUACCAAAGCA<miR-79>
+UGUGAUGUGUGCAUGUACAUG<miR-466c>
+ACGGUAUCCCGUUCGGACAGGAUG<miR2880>
+CAGUGAAUUCUACCAGUGCCAUA<miR-3553>
+UUCGCAAGGAUUCCUCAAGAUC<miR-2241a>
+AAAGAUCUGGAAGUGGGAGACA<miR-3156>
+AGCUAGCGGGUGUUUUAUCUGGUA<miR-970*>
+UUCCUAUGCAUAUACUUCUUUG<miR-202,miR-202*>
+UCAGUCUUCAAUUCCUCCCAGC<miR-727*>
+AGAUGCCACUAAGAGAUCAC<miR-263a-as>
+UGGAAGUUGCACAUCAUGCCGU<miR-1421f>
+UGAGAAGUAAGACUACCAUCCCGU<miR-2058>
+UCUAAGUCUUCUAUUGAUGUU<miR776>
+ACUUAGCAGGUUGUAUUAU<miR-374c*>
+UUUGGCAACUCAUGAACGAAUG<miR-2261>
+UGGCAGUGUGGUUAGCUGGUUG<miR-34>
+CCUGCAUCUGCACCUGCACCG<miR1030i>
+ACCCUGUAACUCAGCCAUCAGAG<miR-2367>
+CUUGUGCGUGUGACAACGGCUAU<miR-210>
+UGAGGUAGUAGUUUGUAUAGUU<let-7g>
+CAGCUAUUCAGGAUCUUUCCCU<miR-31b-1*>
+UCGCAUUGGGACCUGGAUGACUGA<miR-3388>
+UGGAGAAGCAGGGCACGUGCA<miR164g,miR164d,miR164,miR164a,miR164f,miR164e,miR164b,miR164c>
+CACAUCAUCAACAUCAACUCC<miR4233>
+AAUCAGCCAAACACGGCAGA<miR1170.2>
+UUUCGUUGUCUGUUCGACCUU<miR858>
+CAGCACUGUCCGGUAAGAUGCC<miR-3548>
+UAUGUGUGUAUCAAUUGUGUGAAA<miR-2193>
+UUUGGGAUCAGAAAUUAGAGA<miR2643>
+CUCUUGAGGGAAGCACUUUCUGU<miR-526b>
+UGCUCUCUGCUCUCACUGUCAUC<miR156j*>
+GUGUUGAAACAAUCUCUGCUG<miR-653>
+UACAUAGAUUGGUACCUAUCA<miR-741-5p>
+AAAGAUGCCACGCUAUGUAGAU<miR-741-3p>
+AGCUAGAGUUAUGUGUCUGAU<miR2081>
+CGCCAAUGGAGAUUUGUCCGG<miR399a,miR399b>
+UCCGAUAAAGCUUCCCCCUGC<miR906-3p>
+CAAUAUCAGCUGGUAAUUCUGGG<miR-283>
+UGGAGAAGCAGGGUACGUGCA<miR164c>
+UAAUACUGCCGGGUAAUGAUGGA<miR-200c>
+UUGAAGAGAGGUUAUCCUUUGU<miR-300*,miR-300-5p>
+AUAAAGCUAGGUUACCAAAGUUA<miR-79>
+AGCUUUUGGGAAUUCAGGUAGU<miR-3140>
+AUGUAUGUGUGCAUGAACAUGU<miR-297b-5p>
+AGUGCCUGAGGGAGUAAGAGCCC<miR-550a,miR-550>
+UGCCAAAGGAGAUUUGCCCCU<miR399g>
+AAAGUGCAACUUUGAUAGUG<miR-4030-5p>
+CUCAACACGAUGGCCACGGA<miR-2752>
+CUAGAUUUGUUUAUUUUGGGACGG<miR1862e>
+CCUAGUAGGGCUGCUGAGGUGAU<miR-1714>
+AAAUCUCAUCCUAAUCUGGUUGAC<miR-259>
+CAGCUAGGCCGUCCAUGAGGUCGUA<miR-H9-3p,miR-H12-3p>
+UAAGUCAUGACAAGUUUUUCU<miR-1422f>
+UACAUGUACCGUUGCUCAGAGA<miR-1476-3p>
+UUUUGCGAUGUGUUCCUAAUAU<miR-450,miR-450a>
+CCCAGUGUUCAGACUACCUGUUC<miR-199,miR-199a,miR-199a-5p>
+GGCAAGAAUUAGAAGCAGUUUGGU<miR-268>
+AGGCAGUGCAUCUCUAGCUGG<miR-449c>
+CGGGGCAGCUCAGUACAGGA<miR-3107*>
+UUGGGAUCAUUUUGCAUCCAUA<miR-450b,miR-450b-3p>
+UUCUUCCCGAACUCAGGCUAA<miR-979>
+CCUCUGAGAUCUUGCUAGGCGCU<miR-2376>
+CGGUUUAAUUGGAUGGAA<miR-4205-5p>
+UCAGAUAAUUUUUAAACCAAAGU<miR-3353>
+GAAGCCAGAUGCCGUUCCUGAGAAGG<miR-677*>
+CAGCACCACCAAGAUUCACA<miR172c*>
+UACCCGUUGGUUUUCGGACAGUU<miR-2237a>
+GUGAUAAUAUGAUGUCAUAA<miR-4151-5p>
+UUGCGUAGGCCUUUGCUUCGA<miR-242>
+UGAGAUCAUUGUUCAAGCUCUUA<miR-753b-3p>
+AACUUUGAAAUUCGAUCUGAU<miR-2169-5p>
+CGGCUCUGGGUCUGUGGGGA<miR-760-3p,miR-760>
+AUUAUCUGCAGCUGCAGAUGCAA<miR-2281*>
+AACUACACGAUAUUCGUUCUUG<miR-982b>
+GCAGUACUGGAGACAGGUGG<miR-4048-3p>
+UCAAGGAUUAAGCUAUGAAGC<miR3438-5p>
+CUCCACAAGCUCGGGCCCAGU<miR-1359>
+GAGCAGCAGAGGAUCUGGAGGU<miR-1907>
+CCCUGCGUGUUCUACCAAGUUA<miR-2758*>
+UGCAUCCCAUGUGACCACCCUA<miR-1421q*>
+CUUGUCUGCACUCCCGUUCUUU<miR-4115-5p>
+CUGGGGAGGGCUUCUGAGCUCCU<miR-612>
+UCUGGAAGUUGCCCUGGACGUG<miR-1626>
+AAUGUAGAGAUUGAUCAAAAU<miR-3668>
+CCCGAUGAGCAGUUAGUCC<miR-rR1-3>
+CUCACUGAACAAUGAAUGCAA<miR-181b-1*>
+UAGCAGCACGUAAAUAUUGG<miR-16>
+UGCUGCCUGGUUAAGAGCUGUGU<miR-745>
+UGAAUCUUGAUGAUGCUACAC<miR172b>
+UGACUAGAUUACAUGCUCGU<miR-996>
+UGAGGUAGUUGGUUGUAUGGUU<let-7d>
+AGCACGGAAGGCGAAGA<miR1168.2>
+UUAGUUGUCUGCACUGGAGAGU<miR-rL1-23-3p>
+UACGCAGGAGAGAUGACGCUGU<miR4376>
+GUGUGGCUCUCCUCUGGCAUG<miR399d*>
+CUCAGCAGUCGACUGUACCGUG<miR2865>
+CCUGUUGUAAGUAAGCUCCA<miR-4001f-3p>
+ACUUGUAUUCUAGCUCAGGUAG<miR-643>
+CUGGAUGGCUGUGAAUUGUCU<miR-1733>
+GCAGAGUGCAAACAAUUUUGCC<miR-759>
+UUUGGUCCCCUUCAACCAGCUAU<miR-133b>
+UCCUUUGUGCUGUGUGUGAGA<miR-M26>
+ACCCCAAGCCUGGCUGCUACCU<miR-2467*>
+UGCCCCCUCCAGGAAGCCUUCU<miR-3072>
+UGUCUGCCUGAGUGCCUGCCUCU<miR-346>
+GUAAGGAACACACAUAUACAAUACC<miR-2500*>
+UCUUACUCCCUCAGGCACUG<miR-550b>
+UAUUGCACUUAUACCGGCCUGA<miR-311a>
+CGGUUUGUCAAGCGGAGUGC<miR2098-3p>
+GAGUAUCAGGAGUACCCAGUGA<miR-257>
+CAUGGUCAGUAGAGGUGCAUGUG<miR-2450b>
+CCCCACCUCUUCUCUCCUCAG<miR-1224*>
+AGCCUACCUUUAUUUUAUUU<miR-2039*>
+UUCAGCUCCUAUAUGAUGCCU<miR-337-3p>
+AAUCACAGUCAACUGUUGGCA<miR-250>
+UUUAGAGACAGGGUUUUGCUAU<miR-1303>
+GCAACAUCUUCAAGAUUCAGA<miR172d*>
+ACUACUACAUCAUUGACGUUGAAC<miR480a>
+CACGGCCGCCGCCGGGCGCC<miR-4332>
+CUCUGCGGAAGUUGGCGCUUU<miR-2342>
+ACAAGGUAAAUAUCAGGUUGUUUC<miR-963>
+AACAUUUACAAGCGAGCCUUAAU<miR-124d*>
+UUUCCCAGACCCCCAAUACCAA<miR3632>
+UAUUGUCAGAUCUCUGUCCUCA<miR-2554*>
+ACGUGAAAUUGUUGACUG<miR-4104-5p>
+UAGCACCAUUUGAAAUCAGUUU<miR-29a,miR-29>
+ACAUUCAUUGGAGCAGGGACA<miR-1782>
+UGUUCAUGUAGAUGUUUAAGC<miR-1206>
+UGUAGUUUAAGAGGAUAGGUCUU<miR-1740>
+AGAAAAUUUUUGUGUGUCUGAUC<miR-3647-3p>
+ACAUAGCCUGAUAGAGGUUACG<miR-282*>
+AUAGGAACAUGGAAGAUUGUCA<miR-2468>
+CAACUGAGCUUCCUCAUCUCU<miR4224>
+UCAAAUGCUCAGACUCCUGUGGU<miR-105a,miR-105>
+UACCGGAGUCUUUUCUGUG<miR-2051>
+CUGGAGAUAUGGAAGAGCUGUGU<miR-1270>
+UUCAUCAGGCCAUAGCUGUCC<miR-77>
+UCUGUGGUUGCGUGAUCGCCGAG<miR-3336>
+UAUGUAACAUGGUCCACUAACU<miR-379*>
+GGUUUUGAGAGGAAUCCUUUU<miR-258>
+UCUUUGGGUCUUUCUCUCCUG<miR1039-5p>
+UGGCAGUGUAAGUAGCUGGUG<miR-2227>
+AGAUCGACCGUGUUAUAUUCGC<miR-369-5p>
+UAAGCCUUACAUAUUGACUGA<miR-798>
+AGCAGAAGCCGGGUGGUUCUCCCA<miR-298>
+AGAGAUUCCAUCACGAAGCAC<miR1058>
+CUCUCCCUCAAGUUCUUCUA<miR477c,miR477g>
+GGCAAGUCUGUCCUUGGCUACA<miR169c*>
+UCGACAGCACGACACUGCCUUCA<miR-196b*>
+UUUCAUGUCGAUUUCAUUUCAUG<miR-288>
+AGUUGUAGUCUUUCAAACAGA<miR-1805*>
+UAGCCAAGGACAAACUUGCCGG<miR169p>
+UGAGCUGCUCUGUUCCUGCAUCC<miR-1751*>
+GUGCUGUUUGUUUUCCUUUUUU<miR-2452>
+UAUACCGUGCCCAUGACUGUAG<miR2947>
+UAUUCAUUUAUCUCCCAGCCUACA<miR-664-3p>
+UUCUCCAAAAGGGAGCACUUUC<miR-519e*>
+AUGCAGAUUUUGGUACACUUCA<miR-2208b-3p>
+AGAGGAGAAUAACGUCGAACGG<miR-m01-1>
+UGAGUUGGUUAUCAUUGUUG<miR-4003c-5p>
+CAGCCAAGAAUGAUUUGCCGG<miR169d,miR169z>
+UGAUUCUUGAGUAGGACUUCCUUC<miR-3275>
+UUCACUUUGCCACUGCAGGU<miR-4078-3p>
+CAGUGCAAUAAUAUUGUCAAAGCAU<miR-301>
+GAGGGUUGGGCGGAGGCUUUCC<miR-296>
+UGCAAGUGACGAUAUCAGACA<miR3630>
+UGAACCCUGAUAAAGCUAGUGG<miR-799>
+UGUAUCCCAUGUGACCGCUCU<miR-1421l-1*>
+AAAAACUGAGACUACUUUUGCA<miR-548e>
+AGAUAUGUUUGAUAUUCUUGGUU<miR-190>
+GUCAACACUUGCUGGUUUCC<miR-505>
+UGACUAGAACCGUUACUCAUC<miR-61>
+UUCACAAGGAGAUGUCAUUUAU<miR-513b>
+UAAAUUUCACCUUUCUGAGAAGG<miR-513a-3p>
+ACUUACAGACAAGAGCCUUGCUC<miR-600>
+GGCAAGAUGUCGGCAUAGCUGA<miR-31a>
+UAGCCAUUGUUGUUGUUGGAA<miR1097>
+AGCAGAAUUUUUGGAUACUGG<miR-2315>
+AUGAGUUCGUCAGGUAUUAUCUA<miR-983*>
+UGGGGGCGGUGGGGGGCGGG<miR-1777a>
+GAAAACCACCGCGUUGGGUACGU<miR-3258>
+CAGGGGAUCCAGUUCCGGUUGUGCC<miR-56*>
+UGACAGCGCCCUGCCUGGCUC<miR-2277-3p>
+CCGACUUCUGGGCUCCGGCUUU<miR-1964-3p>
+CUCCCUAAUCGAGUCAGGUUGA<miR-929*>
+CCCAGUGUUUAGACUAUCUGUU<miR-199b>
+CUCCCACAUGCAGGGUUUGC<miR-188*>
+ACGGGUUGUGGGACCCGGAC<miR1151b*>
+UACAUAACUUGUGUCUCUUAGAU<miR-2566a>
+UUUGAUCAUCAGUAAGUGAGAU<miR-961>
+UGACUAGAGAGUUUACUCAUCC<miR-2720>
+CGUCUAGGUCUAGAGUCUCAA<miR-3108*>
+UACUCAGUAAGGCAUUGUUCUU<miR-201>
+AAACGCCAUUAUCACACUAA<miR-122*>
+UGCAUAGUGUGUGACCUCCCUA<miR-1421f*>
+UCUUGCUGGGGCCUCCA<miR-720>
+AGGGACCUGAGUGUCUAAG<miR-3649>
+AAGCAGCACAUAAAUACUGGAG<miR-457b>
+GAGGGAGGGACGGGGGCGGUGC<miR-149*>
+UGGGCUGACAACAGAGGGCC<miR-1600>
+UAUGGCACAUUGAGACGGAG<miR-312>
+GAGACUGACAAGUUCCCGGGA<miR-873*>
+GCAGAGUGCAAACCAUUUUGAC<miR-759>
+UUGGUCCCCGUCAACCAGCUGU<miR-133a>
+GUAUUAGUUGUGCGACCAGGAG<miR-230>
+GGAGAUUCUUUCAGUCCAGUC<miR319d*,miR319c*>
+ACUGCAUAAUGAGCACUUAAA<miR-20a*>
+UUCACAAGGAGGUGUCAUUUAU<miR-513b>
+GAGGUCGGGGAUUGCAAGGAG<miR2913>
+CAGCUCAACUUAUACAGAAC<miR-4082-5p>
+UGGAAUGCAUAGAAGACUGUA<miR-256>
+UGUGACUGGUUGACCAGAGUGG<miR-134>
+CCUACUCCUCCCAUUCC<miR482.1>
+UAUAUAGGGUCAGGGGGUUC<miR-H8>
+UGCAUAAUGUGUGGCCUCC<miR-1421ah*>
+UAAAUUCGGUCUUUCGGGC<miR-2745>
+UAAAGUCGAUUGCUCUACCCAC<miR-2210*>
+AGGUUGUUUGGUUUUGUGUU<miR-2325b>
+UCACUGGGCUUUGUUUAUCUCA<miR-318>
+UCAUCGUCCAAUCAGAAUGUGACA<miR1520o>
+GGGUACGUCUCCUUUGGCACA<miR399c*>
+AUUCUAAUUUCUCCACGUCUUU<miR-576-5p>
+ACUCAAAUGUGGGGCACACUUCU<miR-295>
+CUUGGGUCUACUGUGUGCCAGG<miR-493a>
+AGGAGCGAGGAAGGGGAUGGGA<miR-2962>
+CUGUCCUAAGGUUGUUGAGUU<miR-676>
+UGAUUGUAGCCUUUUGGAGUAGA<miR-508-3p>
+CCUCCUGCCCUCCUUGCUGU<miR-1976>
+CUGCAUCCCUUGUGACCUCCGU<miR-1421a*>
+UAGCUCUAGCUGAUGUAGCA<miR-4079-3p>
+UGUUCGUUCGGCUCGCGUUAUCU<miR-375>
+UAGCAUAACAUUGUAAGAGAUU<miR-2030>
+UUCUCUGAUUUACACUAGCUGAG<miR-1756b>
+CCACUCUCUCCGUUUCCCUUCC<miR1023c-5p,miR1023d-5p>
+CGUGACGAACAUAAUCAAACG<miR3447*>
+GCUCUCUAUACUUCUGUCACC<miR157c*>
+AUAACCCGGGCCAAAAGCUCAC<miR-3546>
+CAAAUCAAAUCUUCAAGGUAC<miR829>
+GGGGCGGGGGGGCGGGUG<miR-2881>
+UACGAGCCACUUGAAACUGAA<miR841>
+ACUGACCUUUGGAUGGUGCUUCAA<miR-N367>
+GAAGCUCGUUUCUAUAGAGG<miR-993*>
+CUCUACUCCCUGCCCCAGCCA<miR-3102-3p.2>
+UAUUGGCCUGGUUCACUCAGA<miR171a*,miR170*>
+AGGCUGAGGACAGGGGCUGACGU<miR-2338>
+AAACAUGGUUCUGUCAAGCA<miR-218*>
+GUGGCUGCACUCACUUCCUUC<miR-647>
+CAAAGUGCCUCCCUUUAGAGUG<miR-519d>
+AUGUGUAUAAUUUGGCCAUCAUA<miR-2552*>
+UAUCUUGAAUUUGAUUAGCACUAAA<miR-2787*>
+AUCAAGAUCGUUAGUAAGUU<miR-2203>
+UACAGUAUAGAUGAUGUACU<miR-144>
+UGGAACGGAGGAAUUUUAUAG<miR1320>
+AAACAUUCGCGGUGCACUUCU<miR-543*>
+UGCCGAAGGAGAUUUGUCCUG<miR399f>
+AAGGUUUUUGAGCCGUAAAUCA<miR-2156b*>
+UUAAGUAGUGGAUACAAAGGGCGA<miR-1002>
+UGCUAUCUUUGAAAAGUUUGGAAUA<miR-3375>
+AUGCACCUGGGCAAGGAUUCU<miR-500>
+GUUCUCUUCAAGCACUUCACGA<miR395o*>
+UGAAACUUGCUUAGUACGGG<miR-4000h-5p>
+UCCUGCGUAGGAUCUGAGGAGU<miR-3193>
+AGACCCUGGUCUGCACUCUGUC<miR-504>
+AAAAGCUGGGUUGAGAGGUGA<miR-320>
+ACAGUAGUCUGCACAUUGGUU<miR-199,miR-199-3p>
+UUGUGUGUGAACUAAACGUGG<miR1850.2>
+UGUAAACAUCCUACACUCUCAGC<miR-30c>
+ACACGAGAUCUGGACGACGAG<miR-B1>
+AAGAGAACUGAAAGUGGAGCCU<miR-3925>
+UUGCCCUUUUUAAGCAGGGC<miR1160.1>
+UGUAAACAUCCUCGACUGGAAGCU<miR-30a-5p>
+CUGAAGCUCAGAGGGCUCUGAU<miR-127-5p,miR-127*>
+UAACUCACUGUCAUGUCCUCA<miR-3087>
+UCAGCUGUACAAUUGGCAUUGUGU<miR-2154>
+UAAGACAAACUUCACCCAGUGA<miR-309>
+CAAAGCGUUUGGGUUCUGAAAC<miR-927>
+UAGCACCAUUUGAAUUCAGUUC<miR-285>
+UACCCUGUAGUUCCGGAUUUGU<miR-10a>
+GUGAGGACUCGGGAGGUGGAG<miR-1224>
+AUGUGACCGAUAUAAUGGGCAU<miR-2001>
+UGGUCGACCAGCUGGAAAGU<miR-412*>
+UGAGCCAGGAUGGCUUGCCGG<miR169p>
+ACGUAUACUGAAUGUAUCCUGA<miR-iab-4-5p,miR-iab-4>
+GCUCUCUAGCCUUCUGUCAUCA<miR157a*>
+ACGGGUCGCUCUCACCUAGG<miR4416>
+CUUGUUUGUGGUGAUGUCU<miR1535>
+AAUACCUCAGUCUUAUCAGGUGU<miR-875>
+UGGGAUAUGAGCAAACGUGUAC<miR-54a>
+UCCUUUCUUGCUUCGCUUGCGUG<miR-3312>
+CGGCUCUGAUACCAAUUGAUG<miR845a>
+UUAGUAGGCGUUGUGGGAAG<miR-253>
+ACAUAUUAUGGGUCUCAGACGGAC<miR4402>
+CCUCCGUGUUACCUGUCCUCUAG<miR-3605-3p>
+GAUCGAGAAGUUAAAUAACUCGC<miR-3295>
+UGCUGCCGACUCAUGCAUCC<miR319>
+UCUUAUCACGAGGAGCACUUUU<miR-1643*>
+CAGCAGCAAUUCAUGUUUUGGA<miR-322>
+AUAGCUCUUUAAAUGGUACUGC<miR-458>
+ACUACGUCAAUAAGGCAGC<miR908.3>
+GUGGAUAAGGCUUUGGCUU<miR-1261>
+UCGAUAAACCUCUGCAUCCA<miR162>
+UAGGUUUGAGAAAAUGGGCAG<miR2661>
+UGGGUAAAAACGCCAAACAUG<miR-3007-3p>
+CCUUAUCAUUCUCUCGCCCCG<miR-184*>
+GAUUUAGCCUCUCCUAGGCUUUGUCUGU<miR-282>
+CCUUCUCUGUUUUGGCCAUGGG<miR-942>
+ACUAGGUUUGUUUAUUUUGGGACG<miR1862d>
+CGCUAUCCAUCCUGAGUUCCA<miR390b*>
+CAUAAAAGCUCAGUGUCAAACU<miR-64c*>
+AAUCAUUAGAUGAAAACUCACG<miR-4100-3p>
+CCCACCGAGGGAUGAAUGUCAC<miR-181d-3p>
+CCUCUGAAAUUCAGUUCUUCAG<miR-146a*>
+UAACACUGUCUGGUAACGAUGC<miR-141>
+UCUGGGCACAGGUAAACUUUG<miR-1475>
+UGGGCAGUAGAGGUGCAUGUG<miR-2450a>
+AGGUAGUAGGUGUGUGGUUU<miR-2288>
+GGCAGGUCUUCUUGGCUAGC<miR169o*>
+GUGUUGGGAUCACCGCGGUAA<miR-3602>
+CCCCCAGGUGUGAUUCUGAUUCGU<miR-361*>
+GUGUGUGCGUACAUGUACAUGU<miR-466n-5p>
+AUUAAGGGUGCGGGUGCGGCU<miR3694>
+UGAUAUGUUUGAUAUAUUAGGU<miR-190a,miR-190>
+UCCGUCUCAGUUACUUUAUAGC<miR-340-3p,miR-340*>
+CAGAGUGGGCAGUCGGUGUCGAUC<miR-2217*>
+UCCUCGGUACCUAUGUUGAU<miR2680a,miR2680d,miR2680c,miR2680b,miR2680e>
+AGCAAACUCGGGAAGGCGCG<miR-4123-3p>
+UUAAUGCUGUAUCGGAACCCUUC<miR-M4>
+UGCAAUAACUUUAAACCGCUGAGCU<miR-3402>
+AAUAUAACACAGAUGGCCUGU<miR-410>
+AACUGGCCUACAAAGUCCCAGU<miR-193,miR-193a-3p,miR-193a>
+UGCAGCAGCCUGAGGCAGGGCU<miR-1906>
+UAGUUUUGCAUAGUUGCACUAC<miR-19a*>
+UUGGGGUUUCGAAAUCAAGAG<miR3439*>
+AAAUUCGUAUCUAGGGGAAUA<miR-10a*>
+AGGCGACCGCAGCCGUGGACU<miR-2069>
+UGAAAUGUUGUCACUAGAG<miR-4118-3p>
+CAAUCAGCAAGUAUACUGCCCU<miR-34a*>
+CUGCAGUCACAGUGAAGUCUG<miR-682>
+AAGAGUGCACCCCCUUUCCAAU<miR1103-5p>
+UUGCUGUGCACUACUUAGUAC<miR898a,miR898b>
+UUAGACCUAGUACACGUCCUU<miR-3684>
+UAGGUGGAAGAACUAAAAUAUU<miR-2538>
+GCCUGCUCAAACUAGUUCUCGU<miR-4001d-3p>
+AACACACCUAUUCAAGGAUUC<miR-362-3p>
+CCAGUCAAUGUUGACACCACCGC<miR-2692>
+CCAGGACCAUCAGUGUGACUAU<miR-1933-3p>
+CAAGAAGGUUGCUCACUAUUU<miR2670d,miR2670b,miR2670a,miR2670c>
+CUGCCAGUUCCAUAGGUCACAG<miR-192*>
+AGUUGUGUGUGCAUGUAUAUGU<miR-669l>
+AGUUUUGCAGAUUUGCAGUUCAGC<miR-19b-2*>
+UCCUUAGCGUGGUGCCUGAGA<miR-M20*>
+UGCUGCGAAGUGUUCGACCUCC<miR-1421i-1*>
+AAGGGACAAAACAUUGAGCAG<miR1114>
+UGAGCCAAGGAUGACUUGCCGGU<miR169d>
+UAAUGCCCCUAAAAAUCCUUAU<miR-365-3p,miR-365>
+AACGCCAUUAUCACACUAAAUA<miR-122*>
+UUAAUCAAGGAAAUCACGGUCG<miR1509a>
+AAGCAGCAGUGUGCAGUGGUGA<miR-2066>
+UUAGGGCGAAGUGCGAGCACUGG<miR-H13>
+AUGCAACAAAACUGCGGUUA<miR-4093-3p>
+GUCUCCUGUACCCUCAUCGUCG<miR-I6*>
+CCACCUCCCCUGCAAACGUCCA<miR-1306-5p>
+UGAGAGAAAGCCAUGACUUAC<miR1513>
+AUGCAAACUUGAUCAGGUUUUA<miR-4178b-5p>
+ACCUUUUGUUUCUCUAGCUUUAU<let-7c*>
+UAAAUAGCUAUGAAGUGAUACA<miR-2046*>
+UACUGAGAAUGGGUAGCAGUCA<miR-883b-5p>
+CUCAAAAUGGAGGCCCUAUCU<miR-294>
+UCAUUGAGUGCAUCGUUGAUG<miR397b>
+UGAUAGACGCCAAUUUGGGUAG<miR-463>
+ACGUAUUCGGCUCUCAGU<miR-125-3p>
+UGCAUCACGUGUGACCUGCCC<miR-1421k-2*,miR-1421k-3*>
+UUUGGAGUGAAGGGAGUUCUG<miR159g>
+GAAAGUGCUUCCUUUUAGAGGC<miR-526b*>
+UAAAUGCAUCUUAACUGCGGUG<miR-232>
+UAGCCAAAGAUGACUUGCCUG<miR169n>
+UGAAGCUGCCAGCAUGAUCUU<miR167e,miR167g,miR167f,miR167b,miR167-5p>
+UGUGAUUGGAGACUUUUACCGU<miR-2037>
+AACCUGUUGAACAACUGAACCC<miR-582*>
+CUCAUCUGCAAAGAAGUAAGUG<miR-452*>
+UUUGGCACUUAAGGAAUCGUCAC<miR-96b>
+UUGGCAUUCUGUCCACCUCCAU<miR394c,miR394a>
+CGAGGUAAACAUCGGCUUACUG<miR-rL1-7>
+UCUUGCCUACUCCACCCAUGCC<miR482b>
+CGCACCCCGCGGAGCUCACACU<miR-3093-5p>
+AAGUGCUGGCUUUUUGACGUU<miR1045>
+UAUACAUACACACCCAUAUAC<miR-669d*>
+UAACAACAGCGGAAGAACCUUCUU<miR4364b>
+UCAGUGCAUGACAGAACUUGG<miR-152>
+CAUCGGGGAUGUCGUGUCUUU<miR-425-3p>
+UCGGUUAUCAUGGUACCGAUGC<miR-101b*>
+UAAUACGUGAUAGUGAGAGUG<miR-3291>
+UAUGCUGUACUGCAAAGGCUCC<miR-1501>
+AGAAGCAAAAUGACGACUCGG<miR3933>
+UGAUUGUUUGUAUCAGCUGUGU<miR-2189>
+AGGCAGCGGGGUGUAGUGGAU<miR-885-3p>
+UUGGCCUAUUGAACCUCUGUUU<miR402>
+GUUGUGUGUUUUUGUUUUCC<miR-2390>
+CUCUCCCACCGCUAAACUUGAC<miR-735>
+CGGCGGGGACGGCGAUUGGUC<miR-1908>
+UUGCAUAGUCACAAAAAUGAUC<miR-153c>
+UUUGGUCCCCUUCAACCAGCUA<miR-133b>
+UGUGCCGUUCUGACACAGCUCU<miR-1578>
+UACAGUACUGUGAUAACUGAA<miR-101a,miR-101>
+UCACAUCAUUUUCCCCUCACAGU<miR-2559>
+AGGGAUAUUUUACUCCGCUU<miR-2822>
+UAUACAUACACGCACACAUAG<miR-466d-3p>
+CCGUCCUGAGGUUGUUGAGCU<miR-676>
+GUCUUACCAGACAUGGUUAGA<miR-429*>
+UCUGAAUCCGUGCUGAGAUUUU<miR-3499>
+CACUUAGAUUGUUCUUAGUAUGAG<miR1887>
+ACUUCUGCUGCAGACCUGGAAGAC<miR-2464-5p>
+UACUUAUCAUAGUAUCUAUGAAA<miR-3222>
+GAAAGCCACCAUGCUGGGUAAA<miR-742>
+UGAUUGGUAUGUCUGUGGGUAGA<miR-509>
+AGAUUGCUUUCAAGGUCAUUUCUU<miR1882c,miR1882g,miR1882b,miR1882d,miR1882e,miR1882h,miR1882f,miR1317-5p.2,miR1882a>
+UACGCAUUGAGUUUCGUUGCUU<miR777>
+GGUAAAGUGGCGGCUAGGUUA<miR901>
+GCGUAUGAGGAGCCAUGCAUA<miR160a*>
+ACGAAGGUCUGCAUCAUAGC<miR902b-3p,miR902a-3p>
+CUCCUGACUCCAGGUCCUGUGU<miR-378*>
+UCACCGGGAGCAUUGUAUGAUC<miR-2235>
+CUGUUAAUGGAAAAUGUUGA<miR1521>
+UAAGCUCGUGAACAACAGGCAGG<miR-231>
+UCAAAGGGAGGUGUGGAGUAG<miR2119>
+UAAAGUGCUUAUAGUGCAGGUAG<miR-20a,miR-20>
+UUUUGUUCGUUCGGCUCGCGUGA<miR-375>
+UAUUGCACUUGUCCCGGCCUA<miR-92a>
+UUCUGCCAGUCUCCUUCAGAC<miR-3084>
+UUCCUGAUGCCUCCCAUGCCUA<miR2118d>
+CAUCAACAGGCAUUUACUUCAACU<miR-987*>
+UGUGCGCAGGGAGACCUCUCCC<miR-933>
+ACUCAUUUGAGACGAUGAUGGA<miR-3071>
+UGAGUUCAGGGACAGCGUGUCU<miR-3089-5p>
+UCACCUGAGCUCCCGUGCCUG<miR-3622b-3p>
+AUCUCGUCAACCUUCGUCAGAUG<miR-2075>
+GUGAGCAAAGCUUCAAAUGAG<miR-87b-3p>
+UUGUAGAGUCACGCACCUCUG<miR1223i,miR1223h>
+UAGUGCAAUAUUGCUUAUAGGGU<miR-454>
+GUGCCUACUGAGCUGAUAUCAGU<miR-24,miR-24-1*,miR-24*>
+UCUGUAGCCUGGGAGCAAUGGGGU<miR-3137>
+GAAUGCCCUUUCAAAUCCUGGG<miR-365>
+CAGUGCAAUAAUGAAAGGGCGU<miR-130b>
+UGCUGGUGUAGAUGUGUCACAGU<miR-2958>
+UACGUCAUCGCUGAAUGGAAGACG<miR4377>
+AACCCGUAGAUCCGAACUUGUGU<miR-100>
+AAAAAACAAGGAUCCACGGAU<miR3437>
+CGAGCCGAAUCAAUAUCACU<miR171l,miR171m,miR171n>
+GAGAUGUGGAUAUUAUGGUGUGGAGG<miR-2739>
+UGGCAAGAUGUUGGCAUAGCUGU<miR-31>
+GUCUCGGGCUUCUUUGAGGAU<miR-2263>
+UACCCUGUAGAUCCGAAUUUGU<miR-10,miR-10a>
+UGAUUGUCCGAACGCAAUUCUUG<miR-219>
+UACCAGAUGUUAGAUUGAAGGAG<miR-2781>
+UGUCUUGCAGGCCGUCAUGCA<miR-431>
+GGAAGGCUGUGCGAUAGGAGCCGA<miR-I2>
+AAAGACAUAGUUGCAAGAUGGG<miR-3617>
+AGGUCCCUGGAUAUGGCACC<miR905*>
+ACUGAUGUAGAACAAGGCAUGCG<miR-4056-5p>
+GGCUCCUCCUCUCAGGAUGUG<miR-4268>
+GCUGAUUCUCUGAUUUUGAAC<miR3434*>
+UAUCACAGCCACUUUGAUGAGC<miR-13a>
+UGAAGAUGCACCAGAUGUUGAGAGGCC<miR-3374*>
+GUCCCUCUCCAAAUGUGUCUUG<miR-642,miR-642a>
+CAAAGAGGAAGGUCCCAGUAC<miR-583>
+UUAAUGAUGUUGUUGUUGCA<miR-4028-3p>
+UGGAAUGUAAAGAAGUAUGUAG<miR-1>
+UGGCAAGAUUACGGCGAAGCUGA<miR-31-5p>
+UGAGAACUGAAUUCCAUAGGUUGU<miR-146a>
+UUGUAGAGAAAGAGAAGAGAGCAC<miR3946>
+UUUGGACUGAAGGGAGCUCCU<miR319,miR319e>
+GUCCAGUUUUCCCAGGAAUCCCU<miR-145>
+GUCACGUAGGGCACCGGUGA<miR-2821>
+UUGGUCCCCUUCAACCAGCUGC<miR-133c>
+AAAAACUGAAUGAAAUUCUUGG<miR-2285a>
+UAGCCCCUGACUUCAACAUGAG<miR3697>
+CAGAAGAUAGAGAGCACAAC<miR156b>
+UACAUACUUCUUUACAUUCCA<miR-1-2-as-5p>
+CAUGACACUGAAGCGUGUACGGA<miR-64>
+UAUAUUGGAUGAUGUCAACAA<miR3631a*>
+AGUGCCCAGGUGUGGUUAAUCCUG<miR-1585>
+GAGAUCAAAUGUUGCUGUCCUUGGA<miR-3228>
+CGAAGAAUCGCAGUCACUAGUUGU<miR1865-3p>
+AUGUGGGCUCAGGCUCA<miR-4296>
+GUGAGUGGGGUGGUUGGCAUG<miR-702-5p>
+UGUGACUUUAAGGGAAAUGGCG<miR-3164>
+UAUUGGCUAGAGAUAAGACAAAGA<miR4349>
+ACGGAGCUAAAUCGCCAAAGCG<miR-9b*>
+CAUCAAAAUUGUAGAGGACUAG<miR-2967>
+AAUUCCAUUCCUCUUUCUGUCUCC<miR-I1*>
+UCAGUCUCAUCUGCAAAGAGGU<miR-452-3p>
+UUUGUACUAUGCAAAGCUUACAG<miR-2254>
+GAGUGUAGUUCUGAGCAGAGC<miR-4280>
+UUGGUCCCCUUCAACCAGCUGU<miR-133a,miR-133>
+UAUCACAGCCAUUUUGACGAGU<miR-13b,miR-13>
+CCAUGGCCAAGGAUGCCAGAG<miR2594a,miR2594b>
+UCAACUUGGUCAAGGAAUAUUU<miR-2363>
+UGCUAUAGAGCUCCUCUGCUGGU<miR-1366>
+UAAGCUCGUCUUAGUUUUCCUCU<miR-787>
+UUUCUAGAGAUGAGCAUAUAU<miR2645>
+GGCUGGUUAGUUGGUUGUUU<miR-1701>
+GCUCAGGCAGCAGGAGGCUUG<miR-1764*>
+UGUCAUGGAGUUGCUCUCUUU<miR-281>
+AUUGUACUUCAUCAGGUGCUCUG<miR-305>
+GGCAGUCUCUUUGGCUAUC<miR169n*>
+UUAGGGAUGGUCGGACGAGACU<miR-1337>
+UUGGCCCGAGUGCGAGCCCUG<miR-B9>
+UACUGACUUUCUAAUUGAUUUA<miR-3019>
+UGGUACGUGAAAAAUAGAUUUCUA<miR-3293>
+CAGAUUUCGGAUUUUUUGUA<miR-2852>
+UCCCACCGAGCAGCCGGAUCUC<miR1846d-5p>
+CUGGGAGGUGGAUGUUUACUUC<miR-30b*>
+UGGCGCUGGGGCGCGAGGCGG<miR-H17>
+AGGCAGUGAGUUGAUAGCGCCCUGU<miR-1490b>
+UGGCAAGAUUAACUAGCUUACUG<miR-2259>
+GAAUCGGAAAGGAGGCGCCG<miR-3610>
+AGAGCUCAUCCAUAGUUGUCA<miR-549>
+UGGCAGCUGCACAGAAGCCCUUU<miR-1615>
+GAAGUUGCCCAUGUUAUUUUUCG<miR-495*>
+CAUCUUACCGGGCAGCAUUAGA<miR-8*>
+UAAGGUGGCUUUUCUGAAGAUC<miR-2260>
+UACCCAGUCUCCGGUGCAGCC<miR-3130-5p>
+UGCUGUGUUGUCCAAUUGUG<miR-4085-3p>
+UGAAAGGUGCCAUACUAUGU<miR-471*>
+UAGAAAAUCUUGUGUGGAUUG<miR-1422a>
+AAAUUCGAGUCUAUAAGGAAAGA<miR-10-3p>
+GGCCCCGGGCCGGGCCGCCACG<miR-H15>
+CUCCGUUUGCCUGUUUUGCUG<miR-1468>
+UAGCAAUUUUUCAGGACGCUCGG<miR-3227>
+UCUACAGUGCACGUGUCUCCAG<miR-139-5p>
+UGUGUUCCAAGGUCACCCCAG<miR398>
+UGCCAAAGGAGAAUUGCCC<miR399>
+CUGAAGUGUUUGGAGGAACUC<miR395i>
+UCCGGAGGUCCCCUUGUUGCUU<miR3459*>
+UGUAACUUGCCAGGGACGGCUGA<miR-BART13>
+UCACUCCUCUCCUCCCGUCUU<miR-483-3p,miR-483>
+UUGCAUAUGUAGGAUGUCCCA<miR-448>
+UAACAGUCUACAGCCAUGGUCG<miR-132>
+GUAGUGUAUUACAAUACAAAGU<miR-2804*>
+AAGAGAGCUAUCCGUCGAC<miR-281>
+UGAAACAUACACGGGAAACCUCU<miR-494>
+CAUUAUGCUAGUGUUCGCGGG<miR-1993>
+AUGGUACCCUGGCAUACUGAGU<miR-1263>
+AAUUGCACUUUAGCAAUGGUG<miR-367>
+AUUCGUGGAAGACUGGCGGAUCAA<miR4404>
+GUGUUUAGACUAUCUGUUC<miR-199b-5p>
+AACUGGAAGAGUGCCAUAAAAU<miR-60*>
+UCAGACGUGUCAUUUUUCCUAUUA<miR-3428>
+UCUCACAUCACUUCCCUCACAG<miR-1004>
+AGUAGACUGACUCGGCGCCUCAU<miR-1505>
+UAGACCUUUGUGUUGCCAUCG<miR4231>
+UACUGGCCAGCGAAAUCCCAAA<miR-193b>
+UGGCAGUGUGGAUAGCUGGCCGUUU<miR-34>
+UCAUGCUCCAAGAAAACCAGG<miR1857-3p>
+UGUCCCUCUGGGUCGCCCA<miR-347>
+AGAGGUAUAGCGCAUGGGAAGA<miR-202-3p>
+ACUCUUUCUCAAGGGCUUCUAG<miR447b>
+CAAAUUCGUUUCUGCAGGUAU<miR-10a*>
+UUGAAACAUUCUCUACUGAAC<miR-653>
+AAGACAUCAAUUAAAUCUGUGCU<miR-723>
+UUAAGUAGUGGAUACAAAAGGCGA<miR-1002>
+AAGAGUUCAAAAGUAGUGAAGA<miR4221>
+UUUCAUAUGGUGGUUUAGAUUU<miR-29b-1*>
+AAUGUGUAGCAAAAGACAGGAU<miR-511-3p>
+AACAGGUCAUGUGUGAUGCAGU<miR-1421aa>
+UUGGCUCUGUUCCCUAUUUCC<miR-1749*>
+UUCAUUCGGCUGUCCAGAUGUA<miR-1298>
+AAGGUGUGAUGGCAUGACACUCUG<miR4387b>
+UGGGUACAAGGAAUCUACUUU<miR2599>
+UGGAAUGUAGUUGAGGUUAGUAA<miR-796>
+UUGACAGAAGAUAGAGAGCAC<miR156b-5p,miR156e,miR157c,miR156j,miR156c,miR156g,miR157a,miR156b,miR156d,miR156h,miR156f,miR156i,miR156a,miR157b>
+CUUAUGGCUUCAAGCUUUCGG<miR-879*>
+UAGCAGCAAAGACAGUAUUG<miR-4059-5p>
+UCCGAGCCUGGGUCUCCCUCUC<miR-615-3p>
+UGUGAAAGUGAGGCCAGUGUGGU<miR-2690>
+AUAUACACACACACACCUACA<miR-467f>
+UUGAACGCAGAGAUGUACAUCA<miR-1998>
+AGUUUUUCAUUUGGCGUGGCUAGC<miR-980*>
+CUGACUGUUGCCGUCCUCCAG<miR-943>
+UGGCAGUGUAUGUUAGCUGGU<miR-449>
+CUUGGCACCUCGUAAGCACUCA<miR-1271>
+AUUGGAAAGAGUAAGCUGGUGU<miR-2458>
+CGUUUCACGUCGGGUUCACC<miR894>
+UGACUCUCUUAAGGAAGCCA<miR-4171-5p>
+UGAUCUUGAGGCAGAAACUGAG<miR1861a>
+GAAAUCGGAGAGGAAAUUCGCC<miR2933a,miR2933b>
+GUGGAAUGAUGAUAAGUCUGACG<miR-2477>
+AAUGACACCACAUAUAUGGCAGC<miR-489>
+UUAAUUUCUGAGUUUGUCAUC<miR3513-5p>
+UAUCACAGUCCUGCUUAGGUGA<miR-2d-3p>
+UGACUAGAAAGUUCACUUACUGU<miR-61a>
+AAAAUCAAAUUGGGUUCUUUAUUU<miR-2551*>
+AUAUUAUGCAGAACACUAAUGU<miR-2771>
+GUGGCUAUUCCUUCUAUGUUUA<miR-376b>
+UCCCUGAGACCUCAAGUGUG<lin-4>
+AAGCAGCACUGUGCAACUGUGU<miR-2064>
+CGGUCUGUCACGGAACACGGGA<miR-3017b>
+AAGAUUUUAUAAAAAGGUG<miR-4218-5p>
+AGGUUUGGACCGGUGCACCA<miR-92b*>
+GUGUCUUUUGCUCUGCAGUCA<miR-511>
+UGUCUGCCCGCAUGCCUGCCUCU<miR-346>
+AUUGACUUCAUCGGGGUUUGGA<miR-1803>
+GUGCAUUGUAGUUGCAUUGCAU<miR-33>
+CAGGCAGCUAAAGCAAGUCUG<miR-1788*>
+UCACAUUCUGAGGACGGCAGCGA<miR-K12-3>
+UGUAGGGAUGGAAGCCAUGAAA<miR-135a*,miR-135a-3p>
+AAUCAGCAAGUAUACUGCCCU<miR-34a*>
+AGGCAAGAUGUUGGCAUAGCUG<miR-72,miR-31>
+UAAGUAGUAUCCAUUAAGAGGUCG<miR-968>
+UGGGCUCUGCAUCACCCCAUGG<miR-1602>
+CAGCCUGACAGGAACAG<miR-4293>
+UAUAGAUAGCGUGGGUGUGUGA<miR-rL1-19>
+UAGCAGAUGUUUAGGAAUGUGCCU<miR-1661>
+UUCAGGGACUUCAAUUCAGAA<miR846*>
+AAAGGUGGCCGUGGGUGAAUGA<miR-1596*>
+UCCUACAUGUUAGCAUUAACA<miR-155>
+AAAGCGCUUCCCUUCAGAGUG<miR-518e>
+UUCGUUGUUGAUGAAGUCUU<miR-76>
+GUGAGUCUCUAAGAAAAGAGGA<miR-627>
+CGCAUCCCCUAGGGCAUUGGUGU<miR-324-5p,miR-324>
+UACUCCAUUCAUUCUGAGUAGA<miR-880>
+UAACACUGUCUGGUAAUGAUG<miR-200c>
+CUGGUUUCACAUGGUGGCUUAGAUU<miR-29b-2*>
+UAUGACACCUGGGCGAACUGUCC<miR-2232>
+UACAUAUCUUGUGUUUCUAGAU<miR-2566b>
+AUUCACCGUUCUGAGUUGGCC<miR-990>
+UUUGUUUUCCUCUAAUAUCUCA<miR2275d-3p>
+AUCUUUGGGCUAGGUUAGUU<miR-2891>
+UGGAGGUUUCUGGCCCGGCUGG<miR-1325>
+UCAUCCAAUUAAACCACAAA<miR-1740*>
+AUAUGAGUAUUCUGCCUAAAU<miR-1948*>
+UUUAGGAUAAGUUUGACUUUUG<miR-651>
+CCUUCUUCUUCUUCCUGAGACA<miR-1903>
+GACACGGGCCACACCUGCGGCC<miR-602>
+GUUUCUCGAUGUUUUCUGAU<miR-262>
+CACCAGCCCCACUACGCGGUAG<miR-1905b>
+UCUGCAGGUUCACAUCAGCCCCA<miR-1997>
+AAUCCUUGGAACCUAGGUGUGAGUG<miR-362>
+ACGUGUAUACUCAUAGCUAUAAC<miR-137*>
+UGUAUGCCCUAACCGCUCAGU<miR-675*>
+CAACGAGUCCCUGAAAAAUCCC<miR-4076-5p>
+ACUGCAGUGUGAGCACUUCUAG<miR-20b*>
+AGGCAGUGAGUUGAUAGCGCCCUGA<miR-1490a>
+CUUGUGCGUGUGACAGCGGCUAU<miR-210>
+UUCAUGAGCAGCUGCAAAGGUGU<miR-3088>
+CAAGUCGUAGCCGGUGUUAUUACU<miR4353>
+CUUGCCUGUCUAACUCGCUAGU<miR-H4*>
+UCGUAAAAAUGGCUGUGUCGUG<miR-13b*>
+AUGUGUGUGUAUGUUCUUUUGU<miR-466d>
+AGUGGCUUGCUUGUAGGCUGU<miR-M22*>
+AACACCAUUGUCACACUCCA<miR-3591>
+AGCGGCGCGGUAGGAGCA<miR-2126>
+UUGUGUCAGUUUAUCAAAC<miR-599>
+UUAAGACUUGUAGUGAUGUUU<miR-499>
+GGUGGGAGGGUCCCACCGAG<miR-2897>
+CUUGUAUGAUCACUAACCAU<miR823*>
+AGGCAUUGACUUCUCUCUAGAU<miR-1256>
+UCGGACCAGGCUUCAUUCCUC<miR166l,miR166a,miR166c,miR166f,miR166m,miR166h,miR166d,miR166g>
+AAAUUUGUAGUUUGUAGUGAGA<miR-2218b*>
+UAGCAGCACAUAAUGGUUUGU<miR-15a>
+UCCAAUAGGUCGAGCAUGUGC<miR862-5p>
+UUAUUGGUUCAAAUCGCUCGCAG<miR-1011>
+AAUUCAGCAAACUCACGGGAUAA<miR-2838>
+UACUCCAGAGGGCGUCACUCAUG<miR-508-5p>
+UUGUGACCGUUGUUACGGUCA<miR-360*>
+UCAUUUCCUCACCAAUUAUGU<miR-4087-5p>
+GUCUGGGUGGGGCCUGAGAUC<miR-3090*>
+GUGGGUUGGGGGCGGGGG<miR-1346>
+CCGGACAGAAUUUUGUGCCCUUUU<miR-1324>
+UCUCUGUGUUGAAUUUGA<miR-3486-5p>
+AGAGGUUUUCUGGGUCUCUGUUUC<miR-329*>
+CAUAAAGUAGACAGCACUACUA<miR-142b-5p>
+GGUGCUCACAUGUCCUCCU<miR-764-5p>
+UGAGAGAAGUGAGAUGAAAUC<miR1886.1>
+AUAUGUAUAUGUGACUGCUACU<miR-3924>
+UACGUAGAUUGGUACCUAUCAUG<miR-741*>
+CCCUGAACUAGGGGUCUGGAG<miR-345-3p>
+CUUCCAAUCCAGAGGACAGCC<miR-1340*>
+UGUCCAUCGCCAAGUUGCCAG<miR1170.1>
+UGAUUGUCCAAACGCAAUUCUU<miR-219-5p,miR-219>
+AGGUUGGGAUCGGUUGCAAUGCU<miR-92a-1*>
+AGCUACAUCUGGCUACUGGGU<miR-222,miR-222a>
+AGCGAACCUCUGCUCACUGCCC<mir-M1-3*>
+CCAGCAGCACCUAAUCCAUCGG<miR-K12-6-5p>
+CGGGAUACACCCUGUGCUCGCUUUGC<miR-317*>
+GCAAGAUGAAGAACAGGCCUGU<miR-1795>
+GCUUACUCUCUCUCUGUCACC<miR156e*>
+GUAUGCUGUAGCAAGGAUCACUUUGAG<miR-2557*>
+UAGGUAGUUUCGUGUUGUUGGG<miR-196c>
+UUCAGCUGGAGCUUCAGGCAC<miR1156.2>
+UUAAGACUUGCAGUGAUGUUUA<miR-499>
+CAACCAGAUCAGAAAGUCGA<miR-4040-3p>
+UGGUAGACUAUGGAACGUAGG<miR-379>
+UUCAUUUUGAAAAUAGGCAUUG<miR1514a>
+CAGCUGGUUGAAGGGGACCAA<miR-3582>
+GGGUAAGAUCUCUAUUGGCAGG<miR399a*>
+GGACUGUGAGGUGACUCUUGGU<miR-679-5p>
+AGACUGAUUGGGGAAUGAUUGG<miR-I1>
+GUGUUCUCUGAUGGACAG<miR-4273>
+GCCUGGCUCCCUGUAUGCCAU<miR160>
+AGGUGGACAUAUUGCCAACA<miR394b*>
+UUGUGCUUGAUCUAACCAUGU<miR-218>
+UUGAGGUGUUUCUACAGGCUA<miR537b,miR537d,miR537a,miR537c>
+UGCCUCCGGACUGGAUUCUUGAACC<miR-3382*>
+UGGUUUACCGUCCCACAUACAU<miR-299-5p,miR-299,miR-299*>
+AUAGGGGACACGUUCAAGCCG<miR-m21-1>
+UUUGGAUUGAAGGGAGCUCUA<miR159b,miR159a,miR159,miR159a.1,miR159c>
+UCAAUCCAGAGCAGUGUUUUCU<miR-1422i*>
+AACAUUCAUUGCUGUCGGUGGG<miR-181b>
+UAUUGCACUCGUCCCGGUCUAU<miR-92c>
+CAGCUCAUCUGGUAUAAA<miR-4179-5p>
+UUGCUAGUUGCACUCCUCUCUGU<miR-449c*>
+UAGCAGCACGUAAAUAUUGGCG<miR-16a,miR-16>
+CCCUGAGACCCUAACCUUAA<miR-4324>
+CCUCUAGAUGGAAGCACUGUCU<miR-517*,miR-517b>
+UUUGGUCCCUUUCAACCAGCUA<miR-133c>
+GUCCUCGGGAUGCGGAUUACC<miR2111a*>
+UAGCCCCCAGGCUUCACUUGGCG<miR-3943>
+UGUGAUCAAGAUCAGACUACCA<miR3712>
+GUGUGAUGUGACGUGAACAAG<miR-989b>
+UAUUCAUUUAUCCCCAGCCUA<miR-664>
+UCAUUCUACAGGAUCGAAUCAGU<miR-2165-5p>
+ACUGGCUUCCAAAGGUGAGUAGA<miR-285*>
+CACACACUGCAAUUACUUUUUC<miR-603>
+UCGGACCAGGCUUCAAUCCCU<miR166l,miR166n,miR166k,miR166e,miR166g,miR166j>
+AAGCUUUUUGCUCGCGUUAUGU<miR-208b*>
+ACCAGUAGGCCGAGGCCCCU<miR-665>
+ACUCCAAAACAGAGCACAGCG<miR-4196-5p>
+AGUGCCAGCGCGCUCUCGGCC<miR1147.1>
+CGGGCGUGGUGGUGGGGG<miR-1268>
+UAUAUUACUUUUAUGUUCAG<miR-4027-3p>
+AGAAGGACUAGUAAGAUGGCU<miR844>
+AGGACUGUCCAACCUGAGAAU<miR-1388-5p>
+UGGUGCUUGGACGAAUUUGCUA<miR3623>
+CUCGGCGCGGGGCGCGGGCUCC<miR-1469>
+UGUGCAAACCCAUGCAAAACUGA<miR-19d>
+UAUGGCACUAGUAGAAAUCACUG<miR-183>
+GCUCAAGAAAGCUGUGGGAAA<miR396b*>
+ACGAAGGUCUGCAUCAUAGU<miR902c-3p,miR902e-3p,miR902g-3p>
+UAAUCCUUGCUACCUGGGUGAGA<miR-500a,miR-500>
+UGGACGGAGAACUGAUAAGGGC<miR-184a,miR-184>
+UGAGCUCAGGCACUUUGGUGG<miR1115-5p>
+AAAAUGGUGUCUUGAUUGAUU<miR-1422p>
+AAGUGGCCUCUAAAAGUCUA<miR-2186>
+ACGGCGUGAUAUUGGUACGGCUC<miR171b-5p>
+UAAUAGUAUCUACCACAAUAAAA<miR-633>
+GGUUUUUCAUGUAAGAGUCC<miR-2160-2*>
+UGUAUCCUAAUAUUAGACCCC<miR4247>
+UCUGGGAACCGGUUUGGCUGCU<miR-2447>
+UGGACCUCGCGGCCCUGGAGG<miR1166.1>
+UGACCCCGUUCUCCUCGCCGG<miR1846a-3p,miR1846b-3p>
+UAAUAUCAGCUGGUAAUCCUGAG<miR-216b>
+UAGCCAAGGAUGACUUGCCCA<miR169w,miR169v>
+UCGGAACAGGCGUAUUUUUUGC<miR-H15*>
+CUAGGGGGUUUGCCCUUG<miR-4278>
+CUCCCUAACGGAGUCAGAUUG<miR-929,miR-929*>
+UCAGGCUCAGUCCCCUCCCGAU<miR-484>
+AACCUAGUGCCGGUGAUGUGCU<miR-rL1-5-5p>
+UGCAAGCAAUGUGGAAGUGAAG<miR-932>
+CCUCCCACACCCAAGGCUUGCA<miR-532,miR-532-3p>
+CCAUGGAUCUCCAGGUGGGU<miR-490-5p,miR-490*,miR-490>
+UUGGACUGAAGGGUGCUCCC<miR319b,miR319d,miR319c,miR319,miR319a>
+UGCAAAGUAGUGAACAUAAUUUAU<miR-2763*>
+CCCGCCUUGCAUCAACUGAAU<miR168a*>
+UGGUAACUCCAAACCAUUGCCGG<miR-2765>
+AGCUGGAGCACAAAAGCCGGUG<miR-1964-5p>
+AAAGUGCUACUACUUUUGAGUCU<miR-295>
+UAAGUGCUCUCUAGUUCGGUUG<miR-428>
+AACUGAGAAUGCCAUUGGUG<miR952b>
+UCCCUGAGACCCUUUAACCUGUG<miR-125a>
+CGGGAGGGGAGGGAGGGCGGG<miR-2127>
+AAAGUGCUUCCCUUUGGACUGU<miR-520a-3p,miR-520a>
+UGUGGACAAGGCCAAGUCCGA<miR1168.1>
+AUGUAUGUGUGCAUGUGCAU<miR-297>
+UGAGGUAGUAGAGUGCAGUAGUU<let-7j>
+UGAGGUAGGUGCGAGAAAUGA<miR-241>
+GAAUGAGUAACUGCUAGAUCCU<miR-1194>
+CAAAAACCGCAAUUACUUUUGCA<miR-548z>
+UGCAUCCUGCAGCGGGCUCCCC<miR-1548>
+UAAGUGCGCGCAUGUAUAUGCG<miR-467d>
+CCUCUUCCUCUUCCUCUUCCAC<miR2673a,miR2673b>
+AGGGACUUUCAGGGGCAGCUGU<miR-365*>
+UGGCAAUCGCCUGCUGACCG<miR-4141-3p>
+AGAAAUUCUGUGGUCUUGAUU<miR-2148>
+UGAAGAAGACGACGACGAGGAGCAU<miR-I5>
+ACGGAUGUUUGAGCAUGUGCUA<miR-105*>
+CAUUAUUACUUUUGGUACGCG<miR-126*,miR-126-5p,miR-126>
+UGAUGAGUGUUUUCCCAAUUU<miR-2515>
+CAUAAAGUAGAAAGCACUAC<miR-142,miR-142-5p>
+AAAUCCAAUUUUCAUUGCUUAA<miR4246>
+AGGGAGGGACGGGGGCUGUGC<miR-149*>
+AGGCAAGAUGUCGGCAUAGCUGA<miR-31>
+ACCCUGUAGCUGCCAAGGGGCG<miR-2756>
+UCAGCACCAGGAUAUUGUUGGGG<miR-3065*>
+GAAAUCAAGGAUGGGUGAGACCU<miR-551*>
+UAUGACGUAGAAGCGAGUGAAG<miR-63e>
+CCAGAUGUGGUGCAGGCAUGCG<miR-4066-5p>
+UGCUAUGCCAACAUAUUGCCAU<miR-31*>
+AGGACGUCGUACGUCAUGCAGA<miR-1421m>
+UUGACAGAAGAAAGAGAGCAC<miR156c>
+AGGCCGUGGUUCUUGCAAAUACG<miR-92c*>
+CAGCAGUCCCUCCCCCUG<miR-4274>
+UACGUUAUGAGUCGUCGCGUUAA<miR-3257>
+AGAGAUGGGACGGGCAGGGAAG<miR2097-5p>
+GAAGCUCGACUCUACAGGUC<miR-993>
+CGGGUGGAUCACGAUGCAAUUU<miR-363*,miR-363-5p,miR-363>
+UCAACAAAAUCACUGAUGCUGGA<miR-3065-5p>
+UUCAUUUUUAAAAUAGGCAUU<miR1514a>
+UAGCACCAUUUGAAAUCAGUG<miR-29b>
+AGGCCCUCCGUAUAAUGUAAAUGU<miR-M12*>
+AGGGAUCGCGGGCGGGCGGCGGCCU<miR-638>
+AGGGAGCUGUGGAAACAGUA<miR-920>
+AUGAAGUAUUUGGGGGAACUC<miR395b>
+CUCCUACACGUUAGCAUUAACA<miR-155*>
+AACAUUCAACGCUGUCGGUGAGU<miR-181a,miR-181c>
+AUUAUGAGAUCUGAGGGCC<miR-1357>
+GAGCACACUUGGUAGCGGUGCC<miR-2006>
+UACUGUUAUUGCCUGGCCUCGCUCA<miR-3420>
+UGAGGAGUUAAUUUGCGUGUUU<miR-1891>
+CAACUUAUCGCAUUCUUCCAUG<miR-7-3p>
+UACCCGUGAUUCCAUGUAUCGAG<miR-54b>
+UCACCGGGUGGGCAUUGGUUCU<miR-35f>
+UAGUGCAAUAUUGCUAAUAGGG<miR-454a>
+UUCCGCGCUCUGACUCUCUGCC<miR-937>
+UUACAAAACAUUCAGAAUUUUG<miR-3037>
+UGAUGUUAUUUUAGGUUU<miR-4208-3p>
+AUCUCCACACUGAGUCCA<miR-4088-3p>
+AAAGUGCAUCCUUUUAGAGUGU<miR-519f,miR-519a>
+UGAUGGGACACAUACGGAACAU<miR-2857>
+UCCUCGGGCAAAGCGCUUGACA<miR-3080-3p>
+CAGGCCGUACUGUGCUGCGGCA<miR-15a*>
+AAGCCAAGGAUGACUUGCCUG<miR169o,miR169p>
+GUCCUUUCCCUUAUGUUC<miR-4006e-3p>
+UUAUAAGCCAUCUUACUAGUU<miR844*>
+AAGCAGCACAUCAAUAUUGGCA<miR-457a>
+UCAGUAACACGAAUACGUCCUG<miR-4046-3p>
+UGGAAUGUCGUGAAUUAUGGUC<miR-1b>
+ACCCAUUCAUUCCCCGCACA<miR-4020b-3p>
+UGAGACCAAAUGAGCAGCUGA<miR3522a>
+UAUCACAGUCAAUGCUUUGGGCUC<miR-2e>
+GUAGGCCGGCGGAAACUACUUGC<miR-2796-3p>
+UGGAGUGUGACAAUGGUGUUUGUGU<miR-122>
+GGAUUCCUGGAAAUACUGUUC<miR-145*>
+CGGCGUCAUGCAGGAGUUGAU<miR-337*>
+GUCAUUUUUCUAUUAUGCAA<miR-153*>
+UGAGACAGUGUGUCCUCCCUCU<miR-1994>
+GCGACCCAUUCUUGGUUUCAA<miR-551a>
+AUGCAAGGGCUGGUGCGAUGGC<miR-1931>
+GUCAGAGAUCCAAACCCUCCGG<miR-H5-3p>
+CAAGCUUGUGUCUAUAGGUAU<miR-100*>
+UUAAAGCUUUGAUGACGGGAUA<miR-3041>
+UGAUAUCGUCACCCAGCACCGC<miR-1419c*>
+UCACCGGGUAGACAUUCAUUA<miR-36a>
+CUGAAGUGAUGUGUAACUGAUCAG<miR-573>
+CAGCUGUUGACGAAGUAUCAAAA<miR-133a*>
+AGUCAGGAUUACGGUUAGUUUU<miR-4064-5p>
+GGGGCUGGGGCCGGGACAGAGC<miR-762>
+UAGUGCCGUGGUCCUUUUGGC<miR1086>
+UGGUGGGCACAGAAUCCAGUCU<miR-541>
+CCCGACGGAGGCUCGGCG<miR-H3-3p>
+GGGAAUCUGCAGCUUGUGAGG<miR3460*>
+UAAGGUGCAUCUAGUGCAGAUAG<miR-18a>
+UUCCUAGUGCCUCCCAUUCCUA<miR2118i>
+UGGAACAUGUAAGUAAGGGC<miR-4006a-5p>
+UAUUCAUUUAUCCCCAGCCUACA<miR-664>
+UGGAUCCUGCAGUUUGCUUUCA<miR-1616>
+AUUCCUAGAAAUUUUUCAUA<miR-384>
+UUGAACUUUCUAAGGAAUAG<miR-1502a-5p>
+ACCCUGAGUGCAGAAUCUUGGU<miR-1491>
+AGGUUGGGAUCAGUUGCAAUGCU<miR-92a-2*>
+UAAUCUGCAUCCUGAGGUUUA<miR2111c,miR2111m,miR2111,miR2111o,miR2111b,miR2111e,miR2111p,miR2111d,miR2111s,miR2111q,miR2111n,miR2111j,miR2111f,miR2111h,miR2111l,miR2111r,miR2111k,miR2111a,miR2111i>
+GAGAAGUUCGUUCUGGUGUUU<miR-2284i>
+UGGUUUUGGUCCUUGGUAUUU<miR2630c,miR2630m,miR2630a,miR2630b,miR2630l,miR2630r,miR2630g,miR2630o,miR2630s,miR2630j,miR2630d,miR2630t,miR2630p,miR2630u,miR2630x,miR2630f,miR2630q,miR2630n,miR2630w,miR2630v,miR2630i,miR2630k,miR2630h,miR2630e,miR2630y>
+UGGCAAGAUGUCGGAAUAGCUG<miR-31b>
+CCGUCCUAAGGUUGUUGAGUU<miR-676-3p>
+GUGAGCAUUGUUCGAGUUUCAUUUU<miR-1019*>
+UAAUCUGCAUCCUGAGGUCUA<miR2111>
+CAAAGAAUUCUCCUUUUGGGCUU<miR-186>
+CCGAAUGGCAGGCUAAACAU<miR-4119-3p>
+UUAUUGAGUGCAGCGUUGAUG<miR397b>
+AUACUUAUUCAGCUUCUGACAGUU<miR-2707>
+UAACGAUGUUAGUCAAUGCA<miR-4003c-3p>
+UAUUGCACUCGUCCCGGCCUUG<miR-92a>
+ACAGAAGAUAGAGAGCACAG<miR156g>
+AACGAAGUGACUCUAACAUCGGUU<miR4359a>
+AUACCUGCAUGUUAGUCUUUGGUUCU<miR-4333>
+GAACGGCGUCAUGCAGGAGUU<miR-337-5p>
+GAGCUAUGAUGACUUUGAUUGCAU<miR-2484>
+UGCAGCAUGAUGUAGUGGUGUG<miR-2013>
+AAAGCUCGUCUCUACAGGUAUAU<miR-993b>
+AUAAAAGUAUGCCGAACUCGCAG<miR-1013>
+GCCUGGUGUGCUCUUAUUCUGAA<miR-3045b>
+ACUGUGCGUGUGACAGCGGCU<miR-210>
+CUCACAGCUCCGGUCCUUGGAG<miR-673>
+CUAAGUACUGGUGCCGCGGGA<miR-252>
+UCCCUGAGUUCAUGCCGUUC<miR-2231>
+CGCAAAUGCGGAUAUCAAUGU<miR2112*,miR2112-5p>
+AGGCAGUGUAAUUAGCUGAUUG<miR-34b>
+UGAAGAGCUAUUCAUGAGGU<miR-281-5p>
+UGUUCCAGUUUUGAGAGGAGU<miR-1355>
+CAAAGUGCUCACAGUGCAGGUA<miR-20b>
+ACGGGGUGUGGGACCCGG<miR1151a*>
+AUUGCACUUGUCCCGGCCUG<miR-92b>
+UAAACCCUCUCUCUAUUCCUG<miR1054>
+AACAGGUUAUAUGCGGUGCAGU<miR-1421af>
+UUUGUACUACAAUUAGGUACUGG<miR-239a>
+UCACUCCUCUUCUUCAUGAUG<miR847>
+UGCGGGGCUAGGGCUAACAGCA<miR-744>
+UAUGGCACUGCUGAAGGUCCG<miR-2253b>
+CCUUGUCAUUCUUCAGGCCCUG<miR-184*>
+UAUCACAGUAGUUGUACUUUAA<miR-2944a*>
+CACUUCAGAUUGAUGGUGUGU<miR2644b,miR2644a>
+AUACACAUACACGCAACACACAU<miR-466>
+AUCGUAGAGGAAAAUCCACGU<miR-376a>
+GAAGGCGCAUCCCUUUAGAGCG<miR-525-3p>
+UUAUUUCAUAGACUACUCAAA<miR1061-5p>
+GAGGAUCUGUCUAAUCUCAGAGG<miR-2471>
+ACGGAGAGUCUUUGUCACUCAGU<miR-802*>
+AGCGCAGCGGUCGCGAGCGCUCU<miR-639>
+UUCUGCCUCCCCUGAAGGCUC<miR-3110>
+AGGUUGACAUACAUUUCCC<miR-563>
+UCACAGCCAAUUUUGAUGAGAU<miR-2b-3p>
+UAUACAAGGGCAGACUCUCUCU<miR-300>
+UAUCACAGCUUGCUCUAGGUUUA<miR-2e-3p>
+UGAAAGCCAUUCUCAACAAAA<miR1090>
+UAUGACACUGAGUGCGGAGUGG<miR-63f>
+AUCGGGAAUGUCGUGUCCGCC<miR-425*>
+AUUCUGCAUUUUUAACAAGUUC<miR-544b>
+UGUCUUUUUCCGCUUUGCUGCCG<miR-316>
+CAACAAGUCCCAGUCUGCCACA<miR-7a-2*>
+UGAGUAGUCAAUGGAAUAAUG<miR1061-3p>
+GAAGCUCGUUUCUAUAGAGGUAUCU<miR-993>
+UUUCACGCGAAGAUAUUUAUUU<miR-2279>
+CAAGUCUUAUUUGAGCACCUGUU<miR-1264>
+AGCUCUGUUGGCUACACUUU<miR394a>
+UAUCACAGUCCAAGCUUUGGU<miR-2e-3p>
+UUGUGUCAAUAUGCGAUGAUGU<miR-592>
+GCCCUUUUUAUGUUGUACUACU<miR-130c*>
+UCGCUUGGUGCAGGUCGGGAA<miR168a,miR168,miR168b>
+GGUUUGUUUGUCUGGUUCAAGG<miR166j*>
+UCUGCAUCUAAGGAUAUGGUCA<miR-1950>
+UUCUGUGGCUGCAAGGAGAG<miR-1813>
+UAUCUUUUGCGGCAGAAAUUGA<miR-BHRF1-2>
+UGGAGAUCAGGUUUGCACACU<miR-3063*>
+UGUUAUCUCGGGGAGAUCCCGAU<miR-M7*>
+GCUACAACAGAGGACACAGGA<miR-187*>
+UUGAGCCGCGUCAAUAUCUCC<miR171>
+UGCCGCGAGCUGGAGCCUUACG<miR-1413>
+CGUGCCACCCUUUUCCCCA<miR-1227>
+ACAUGUUGCAGAGCGGGGUAC<miR1066>
+UUGGUCCCCUUCAACCAGCUG<miR-133c,miR-133a-3p,miR-133>
+UCCCUUGUAGACUAGAAAAA<miR1445>
+UCGGUGAAUGGCUUGGCAUG<miR-1755>
+UGUGAGUUGUUCCUCACCUGGA<miR-804>
+UGGCUCAGUUCAGCAG<miR-24>
+AGCUUCACUUUAUUUUGCCAA<miR-31-3p>
+AACUGGCCCGUCAAGUCCCUCC<miR-193>
+UAUCACAGCGCACAACGGCGAU<miR-2264>
+UUUCUAGAAUCUGCAGGUAGU<miR-2485>
+UUCACCUCUCUCCAUACUUAG<miR-1016>
+CUAAGAAGUUGACUGAAG<miR-3653>
+UGCUGCAUCACGUGUAACCUC<miR-1421al*>
+UAACUCAACCUUACAAAACC<miR1527>
+UCAUCUGCUGCAUAACCAUCCA<miR-1710>
+UAUCUGUAUCUGCAGUAUUGC<miR-2281>
+AUUGAUUCUGAGAGAACCGGUGUA<miR4406>
+AUCUCGGCUACAGAAAAAUGUU<miR-719>
+CGAUAUAUGAUGUCGAUGUG<miR-3599-3p>
+UGGAUUUUUGGAUCAGGGA<miR-1290>
+CCCAGUGUUUAGACUAUCUGUUC<miR-199b,miR-199b-5p>
+AAGUCUUGCAUCGUGGCAGA<miR-4144-3p>
+GGAAAUGGAUUAGAAUCG<miR-788*>
+UGACUAGACCGAACACUCGCGUC<miR-286>
+UCAUUCUCAAGUUCCAUCGGA<miR3455*>
+UACCCUGUAGAUCCGGGCUUUCG<miR-993b*>
+CACACACUAGAUUACCAAUUUC<miR-9a*>
+GCCAUUCUCAGUUGGAGUCUU<miR-124e*>
+UAUCUUUGAACAAACAGUUGA<miR773b>
+UGACUGUUUUGGUGUAUGGUAGAG<miR-3385>
+UUUGUACUACACAUAGGUACUGG<miR-239a>
+UAAGUCGUGAUGAGUUUUUCU<miR-1422g>
+GCUGACUCCUAGUCAAGGGCUC<miR-345>
+UAUUGCACUUGACCAUGGCCU<miR-235b>
+ACUUUAACAUGGAGGCACUUGC<miR-302d*,miR-302d>
+GUCCUGGCCCUGGUCCGGGUCC<miR-3113>
+GGGCUAUGAUGCUGGAUUUUCUGAG<miR-1674>
+AUAUUGCAAAUUCCCGGCCUUU<miR-310>
+ACAGCAGGCACAGACAGGCAGU<miR-214>
+GUGAGCAAAGUUUCAGGUGUG<miR-87>
+UAUUCAGAUUGGUGCCUGUCAU<miR-743a*>
+AGAAUCUUGAUGAUGCGGCAA<miR172b>
+UGAGCACCACCCCUCUCUCAGAU<miR-3547>
+CGGUGGUAGAUUCUGCGAAGUACG<miR-2808a*>
+GAUCAAAGUGGAGGCCCUCUCC<miR-291b-5p>
+UGUGGGUGUCCGUUGCGGUGC<miR-37*>
+GGGGGGGCUCGGGCCACCUGACC<miR-H5>
+GAGAUCCCUGCGAAAUGACAGU<miR-M6-3p>
+AACAUAGAGGAAAUUCCACGU<miR-376c>
+AGGCAGCUCUCCUCUGGCAGG<miR399j*>
+UGCAACUGUACAAUGACAAUAGUAGGA<miR-3034>
+CCACGGCGUGCUGAUGAUGG<miR-B3>
+GCACAUUACACGGUCGACCUCU<miR-323>
+UUCGCCGAGCAGAUGUCGGAGA<miR-2047>
+UAAAAAGUCAACGGUGUCAAAC<miR2123b,miR2123a,miR2123c>
+ACAGUCUCUGACUUCUCGCAG<miR1065>
+AUGGUCGAAGUAGGCAAAAUC<miR472*>
+UAUCACAGCCAGCUUUGUUGAGU<miR-2b>
+AGGAAUUCUAAAGCAAAAAGG<miR-1926>
+GCUCGCUCCGCAAUGCACCC<miR-4018a-3p>
+CCGGUUUUCAUUUUCGAUCUGAC<bantam,bantam-5p>
+CGCACCACUUUUCACUAGGUGU<miR-rL1-5-3p>
+UGAGGUAGUUGGUUGUAUAGU<let-7>
+UAAGAAGGUGCGCUGUCUUGA<miR1152>
+AAUCCAUACAAGUAUUUUCUAU<miR-1422b-1*>
+UAAGUUGACGUAGUCCCAGGGU<miR-1990b>
+CUAAGUAGUAGUGCCGCAGGU<miR-252>
+UGGCAGUGAUCGCAAGUUAG<miR-4008b-5p,miR-4008c-5p>
+GCUCUCUAAGCUUCUGUCAUCA<miR157b*>
+CUCCGUUUGCCUGUUUUGCUGA<miR-1468>
+GAGGGCGGGAGCGGAGCGCGGGA<miR-1763>
+AUCAUGCUAUCUCUUUGGAUU<miR393a*>
+UGGACGGAGAACUGAUAGGGC<miR-184b>
+CUCGGAGGUGGAGUCGCGGU<miR-H9-5p>
+CGGGGAGAGAACGCAGUGACGU<miR-3175>
+UGAACUAUUGCAGUAGCCUCCU<miR-872*>
+GCACGAUGAUGGCGGAUCUGAGUU<miR-2344>
+GUUCAAUAAAGCUGUGGGAAG<miR396a*>
+UUCGUUGUCGACGAAACCUGCA<miR-981>
+CACCGUGCUGCUGUCGGGCUG<miR-1732>
+GAGGGUUGGGUGGAGGCUUUCC<miR-296>
+UACGUAGAUAUAUAUGUAUUUU<miR-1277>
+AGGCUUCUGUAGAUCAGCCAGC<miR-1728-3p>
+UGAGGUCUUAUAGUUAGGUAG<miR-1821>
+ACUCGGCGGCGAGUGUGUGUGU<miR-2784>
+UUCAGGUAGCGGGACCAGGUG<miR1157>
+CAUUCUGAGAAUAAUCAUCCG<miR1064-5p>
+UGAGGGACAGAUGCCAGAAGCA<miR-3126-5p>
+UCUAGUAAGAGUGGCAGUCGA<miR-628,miR-628-3p>
+UGAGAACUGAAUUCCAUAGGUU<miR-146>
+AAAGUUUAAGAUCCUUGAAGUU<miR-561>
+GGGGGGCAGGAGGGGCUCAGGG<miR-328*>
+GUAAAGCUAAAUUACCAAAGUGC<miR-79-3p>
+CGCAAUACACAUGGUGUCAU<miR-4102-5p>
+AUGUAUGUGUGCAUGUACAUGU<miR-297c>
+CUAAGGGUGAUUAUUCUGCCA<miR2598>
+UAUGUCCAUUGCAGUUGCAUAC<miR534a>
+CUGCACAUUCCACCAUCUCGU<let-7f-3p>
+CAGUAGUCUGCACAUUUGGU<miR-199b>
+UCCCAAAUGUAGACAAAGC<miR158b>
+UAGCACCAUUGGAAUUCAGUUU<miR-285>
+CAGUGCAAUAGUAUUGUCAUUG<miR-301b>
+UGAGGGGCCUCAGACCGAGCUUUU<miR-3184>
+UUGAGCCGUGCCAAUAUCACG<miR171d,miR171e,miR171f,miR171c,miR171a,miR171b>
+UAUGUAGUAUGGUCCACAUCUU<miR-380-3p>
+AUCCUGUGAUGUUCUAUAACUGAGGUUU<miR-1459>
+CCCGUCGGCUGAGCGGCUGC<miR-1557>
+UCUAAACUGGUCACUUCCACUC<miR-3641>
+UCCCUGCCUGGGUCACCAAUUGU<miR-789>
+CUAGUUGUGCCCACUGGUGUUU<miR-BART21-3p>
+UGGUCACAUGAGGUACAGUGUG<miR-1421o>
+CAGGCGGUAUCAGGAGGCUGA<miR-1680>
+UGGCACUGUUCGUAACCUGUU<miR-2995>
+UAAAGUCAAUAAUACCUUGAAG<miR864-3p>
+GCUACGCAGACUUUCUGUAC<miR-4014-1-5p>
+GUGCUCUGGGCCUCGUUGG<miR-4094-5p>
+UGCUACAGCGUGCAGAACGUUU<miR-M1-14>
+UAUACAUGCACACAUACACAC<miR-466c*>
+UGACUAGCGAUACACUCCGGCU<miR-279e>
+GAACGAAAUCCAAGUGCAGCU<miR-3555>
+CGCGGGUCGGGGUCUGCAGG<miR-3621>
+UCACUGGGUGAAGUUUGUCGUA<miR-309>
+UAUCACAGACCGCUUGGAUCACA<miR-2g>
+UCCUCUUUUCUUAGAGACUCAC<miR-627>
+GGUGAUCUUUGUAUGGACAA<miR-3481-3p>
+AUCACAUUGCCAGGGAUUUCC<miR-23a>
+GGAAUGUUGUCUGGCUCGGGG<miR166a*>
+UAGAUUAGAUAGCGAUUCCAUU<miR-2792-3p>
+AAAGGAAAGGUGUGGAUCCAU<miR-2975>
+AAUCAUACAGGGACAUCCAGUU<miR-487a>
+AAAUGCUUGAGUCCUGUUGUU<miR2592q,miR2592g,miR2592l,miR2592j,miR2592i,miR2592r,miR2592e,miR2592b,miR2592h,miR2592p,miR2592o,miR2592k,miR2592c,miR2592m,miR2592a,miR2592d,miR2592f,miR2592n>
+GGGGGAAGAAAAGGUGGGG<miR-4271>
+UUCACAAAGCCCAUACACUUUUAC<miR-350>
+AGGCAGUGUAGUUAGCUGAUUGU<miR-34c>
+UGUUGUUUACGGAAGGGGGA<miR-1787>
+GGCUGCUGAGAAAAUGUAGGA<miR3629b,miR3629a,miR3629c>
+UGAGAUCAUUAUGAAAGCUUUU<bantam-c>
+AACUGGCCCUCAAAGUCCCGCU<miR-193b>
+GCACAUACUUCUUUAUGUACCC<miR-1*>
+CUUUCAGUCAGAUGUUUGCUGC<miR-30d*>
+AUGUUGUUAUUGGAUGAUGACGGU<miR1520p>
+GCUUUGGCGCUUUAGCUGUAUGA<miR-79>
+CUAGUGAGGGACCGAACCAGGACUC<miR-921>
+UUCUCAAGAAGGUGCAUGAAC<miR825>
+UGCAUGCGUGCGACCUCCUU<miR-1421g-2*>
+CCCAGGGGGCGACCCAGGCU<miR-484>
+UCACCAACCACGUAGUAUCG<miR-200*>
+AGGUGAUGGUGAAUAUCUUAUC<miR3520-5p>
+UUCUUUCCGCGCGUGACGGUUUGGA<miR-3220>
+ACCGUGCAAAGGUAGCAUA<miR-1973>
+UUAUCCCCGUGUACUGUUAG<miR-2770*>
+CGGUGUGGGUGGGUGCAUGA<miR-92e-5p>
+CCCAGUGUUCAGACUACCUGUU<miR-199*,miR-199a-5p,miR-199-5p>
+UGCCUGGCUCCCUGUAUGCC<miR160>
+AAGGCCUUUCUGAACCUUCAGA<miR-3142>
+CCCGAAUUAUGUGGGAGCUGCG<miR-995*>
+UUCCACCCUUCCCUCUUUGAAGC<miR-1364>
+AAAAGGGAUUUUUGGGAUGAGA<miR-2963>
+CAAUGCCCCUGCAGUGCAAU<miR-33a-3p>
+CCGCUCGUACUCCCGGGGGUCC<miR-1901>
+UGAUUUUACAAUAGAUAGAUA<miR859*>
+AGGCCUCUUCUCACAAUUCUAA<miR-rL1-21>
+AUUGGGACUUGUGCUGGGAC<miR893>
+UGGGUAGUGUGGCGGCAGGCAG<miR1144b>
+CCAAACCACACUGUGGUGUUAGA<miR-497*>
+UGAUAGACACCAUAUAAGGUAG<miR-463>
+GCUGGUCAAAUGGAACCAAGUC<miR-133b*>
+GCGUGCGAGGUGCCAGGCAUG<miR160f*>
+ACAAUUGUAUGAGUUGAGUACA<miR-1416*>
+CACAAGGUAUUGGUAUUACCU<miR-624>
+AUUACAGGAAACUGGGUGUAAGC<miR-K12-1>
+UAGGAGGAGAUUUAUCUGGAUAA<miR-3393>
+UCACAACCUUUUUGAGUGAG<miR-307>
+UCCCUGAGAAUUCUCGAACAGCU<miR-237>
+UCCCCCAGGUGUGAUUCUGAUUU<miR-361-3p,miR-361>
+GUGUGUGGGAUACUGAUUUUAGAGA<miR-2559*>
+UGGAGUGGAGUGGAGUGGAGUGG<miR1171>
+AGUGGGCAGAGCGAUUCGCUGAU<miR-1832b>
+CCAGUGGAGCUGCUGUUAUCUU<miR-194*>
+AGCUCGACUCAUGGUUUGAACCA<miR-434*>
+UGCAAGCGCUGCGGAUUUGGCA<miR-932*>
+CUUCCCCCCAGUAAUCUUCAUC<miR-3679-3p>
+UGCUACAGUCGUGAGCAGAUCAA<miR-M31>
+GAAUGAUGAAAGGAUUGGGUCA<miR-2372>
+CAUGCUGAUUGUGACGUAA<miR-4219-5p>
+AGAGAAUUGGAGAGAGUGCAU<miR1023a-3p>
+AAAAGUUCGUUGGGGUUUUU<miR-2284a>
+UGAAACUUCUUUAGAAAGGG<miR-4000g-5p>
+UCAAAACUGAGGGGCAUUUUCU<miR-1323>
+UGUAACCCCUGACAGCUGUC<miR-M1-11-3p>
+AUGUUUACAGGGCUCUUCAUU<miR-1597*>
+ACGAGAGUCAUCUGUGACAGG<miR1919c,miR1919b,miR1919a>
+GACGUUGGACCGGCAGCCGGC<miR-2712>
+UCACCGGGUGAAAACUGGUAGAG<miR-35b>
+AAGGUAGAUAGAACAGGUCUUG<miR-1839,miR-1839-5p>
+AGAAGGAUCUGCAACAUAUAC<miR902l-3p>
+UCACUGGGCAAAGUUUGUCGC<miR-309a>
+GCUUGUCGCUGCGGUGUUGCU<miR-3655>
+GUGUUGAAACAAUCUCUACUG<miR-653>
+UGGCUCUGCGAGGUCAGCUCA<miR-1842>
+ACAUGCAAAAUUGACCCGGGUU<miR-2704>
+CAUGAAGGCACAGCCUGUUACC<miR-BART20-3p>
+UAAGGAAAUAGUAGCCGUGA<miR-994>
+GUGAGCAAAGUUUCAGGUGUU<miR-87a>
+UGACCAACCCUAAGUGAGUUUU<mir-M1-8*>
+UGAUUGUCCAUUCGCAUUUCU<miR-219-5p>
+UUCCAGCAGUCAUCUCCAAGG<miR3625*>
+CUAUACAACCUACUGCCUUCCC<let-7b*>
+UGGUGUGAGGUUGGGCCAGGA<miR-1188,miR-1188-5p>
+UGGAAUGUAAAGAAGUAUGU<miR-1>
+AAGUGAUGACGUGGUAGACGGAGU<miR4371b>
+UCACCGGAGACAUUAUUCCGCA<miR-36b>
+UACUGCAGACGUGGCAAUCAUG<miR-509-3-5p>
+UAGCACCAUCUGAAAUCGGUUA<miR-29a>
+GAAAGACGCCAAACUGGGUAGA<miR-743a>
+UUCAAUAAGAACGUGACACGUGA<miR1520c>
+UAGCUGCCUUGUGAAGGGCUUA<miR-980>
+UAUCACAGCCAUGCUACAGAGUU<miR-2f*>
+AAUCAUACACGGUUGACCUAUU<miR-154*>
+UAAGGCACGCUGUGAAUGCCA<miR-124e>
+AGGGAUGGACGUAUACGAGCC<miR1077-3p>
+UGAUAUCAUCACCCAGCAUCGC<miR-1419a>
+AUCGCUCUGUUAUGCUUCGG<miR-4098-5p>
+AAUCGCGUACCGUUGCACAGUCGUGGC<miR-1923>
+UUCACAUUCGGUCAACGUUC<miR1444c,miR1444b>
+UUAAAAGUUUCGUUUCGGUCC<miR2671g,miR2671b,miR2671a,miR2671h,miR2671i,miR2671f,miR2671c,miR2671j,miR2671e,miR2671d>
+CUCACUGAACAAUGAAUGC<miR-181b-1*>
+UAAUACUGUCAGGUAAAGAUGU<miR-8>
+CAGUCCAGCUGGACGGGGACG<miR-1362*>
+UGCAUAAUAACAACAUAUACGCA<miR-3371>
+AUACAGACACAUGCACACACA<miR-466g>
+UAUUGCACUUGAGACGGCC<miR-312>
+CCUCUUUACAUUGUUGUGCUGUA<miR-2030*>
+CAAGUUUGGUGAUACGCGGGCGC<miR-2795>
+UAAACAGCUUGGAAUAUUUACAG<miR-3304a>
+UUCACAGUGGCUAAGUUCUGC<miR-27b,miR-27>
+AAGGGCUUCCUCUCUGCAGGAC<miR-3158>
+UCUAGAUUGCUUUCGGUCUGU<miR3449>
+UGAGUAUUUUUUCGUAUACCGA<miR-2158-5p>
+AACAACUUGUAUAUGCAUACGUA<miR-2173*>
+AGUAUGUUCUUCCAGGGCAGAAC<miR-567>
+UCUUCUCCAAAUAGUUUAGGUU<miR830*>
+UGACUAGACCGAACACUCGUAUCCC<miR-286b>
+AGGCAACUACACGUUGGGCGCUCG<miR1423-5p.2>
+UACUUCGCUGUUCCACAGUAC<miR1094c>
+UAAUACUGUCUGGUAAUGCCGU<miR-429>
+GUACGUCGGGAAAUGUACGGUA<miR-2762>
+AUCCACUUGGAGAGCUCCCGCGG<miR-US25-2-3p>
+CUCACUGAUCAAUGAAUGCAAA<miR-181b-2*>
+AUGGUAGAGGUCGAGUCCG<miR-1367*>
+CUUGGCAAAAUAUAGAACUC<miR-182-5p>
+UACUGGGCACCACCUGUAUGCA<miR-1365>
+UUUGAACUUGUACGAAUUGG<miR-4002-5p>
+UUCUUGGACUGGCACUGGUGAGU<miR-470>
+CUGACCACUGUGAUCCCGGAA<miR3517>
+UGGCAGUGCGUGUUAGCUGGCUGU<miR-449c>
+AGGCUCUGAUACCAAUUGAUG<miR845c>
+GAGAGAUGUCGGGAAGGUCACG<miR-2716>
+AGGCUCUGGUCAUGUGCAUAUAUU<miR-235b*>
+GUGGAUUUUCCUCUACGAU<miR-3595>
+AGGCGGGGCGCCGCGGGACCGC<miR-663a,miR-663>
+GAGGGGACUCGGGAGUCGGAG<miR-2389>
+AGGGGGAAAGUUCUAUAGUCC<miR-625>
+CCUGUUCUCCAUUACUUGGCUC<miR-26b*>
+UGCUCAUUGCAUGGGCUGUGUA<miR-1912*>
+GACUCAUAGAUCUGAAGGCAG<miR-1568>
+AGAUGCAAGAGAAUUUUCAGU<miR-1339>
+GCUGCAUCCCGUGUGACCUCC<miR-1421n-1*,miR-1421c*>
+CAAAUUAAAGCUUCAAGGUAG<miR829.2>
+UACAUAACCAUGGAGUUGGCUGU<miR-BART10>
+UGUCGUCGUCGAUGGAGCCCAUG<miR2927>
+CCCUGCGGAACACCGCGCUCG<miR-3389*>
+UGCACCCUGAGAGCUGGGGCUG<miR-1835>
+AGCUUCCAUGACUCCUGAUGGA<miR-2115>
+UCACCGGGUGAACAUCCAUUGC<miR-42a>
+AGCCAACAACAUCAGUUCUAA<miR3476*>
+UUAGCCGCUGAAAUAGAUGGA<miR-701>
+UGCAGUUGUUGCCUCAAGCUU<miR444f>
+GGUCACAGCUUAAACAUUUCUAGG<miR-K12-11*>
+UGAGGUAGAUUGAUCAGCGAGCUU<miR-795>
+UUGAGCAACGCGAACAAAUCA<miR-356>
+GCGGUGAUGCCGAUGGUGCGAG<miR-598-5p>
+CUUCCAUAUCUGGGGAGCUUC<miR159a.2>
+AACACUGAUUUCAAAUGGUGC<miR-3587>
+UGCAACGAACCUGAGCCAUUGA<miR-891a>
+UGAGAACUGAAUUCCAAGGGUG<miR-146b>
+AGAGCGUCCUUCAGUCCACUC<miR319d*,miR319b*>
+GUAAGUGGCUAUGCCGCGACGGG<miR-2535*>
+ACAGGAGGAUGUCAGGAAGCUU<miR-1574>
+UGGUAGACCGGUGACGUACA<miR-1193-5p>
+AGUAGUGAUCUAAACGCUCUUA<miR1121>
+AGAUGUCCAGCCACAAUUCUCG<miR-2964>
+CCUGGAAACACUGAGGUUGUG<miR-875-3p>
+ACCAGAUGAUUAUGACGACG<miR-4140-3p>
+AGUUCUCAGGCCCGCUGUGGUGU<miR-3067>
+UGAGAUCACUAUGAAAGCUGG<bantam-a>
+AAAGUUCAGUCUUCAUAGUAUC<miR2669>
+GAGUGUAACCACUCUUCUCCUUC<miR-2209a*>
+UGGGUGGUCUGUAGAUUUGUUU<miR-1293>
+AUUGGGGAUGCUUUGCAUUCAU<miR-450a-2*>
+GGAUUGAUGUUAUUCGGUAUGAUC<miR-36b*>
+AAGUUUGGACUUAAAUUUGGUAAC<miR2873>
+UGCAUCAUGCGUGACCUCC<miR-1421ai*>
+GGCGGGUGCGGGGGUGG<miR-3656>
+UCAGCUUAAUAACUGGGCG<miR-4069-3p>
+UAAUACGUCGUUGGUGUUUCCAU<miR-70>
+UAAUGAUUAGUAUGUGGCUU<miR-4209-5p>
+AUCUUAUGUCGGUGUGGCGUGU<miR-3281>
+UGACAACUAUGGAUGAGCUCU<miR-549>
+AAGUGCUGUUCGUGCAGGUAG<miR-93b>
+CACAGCGCAUACAAUGUGGAUG<miR-460,miR-460-3p>
+GAAAUGAUCUUGGACGUAAUCUAG<miR1317-3p>
+GGAAUCUUGAUGAUGCUGCA<miR172b>
+UGACCUGGGACUCGGACAGCUG<miR-3661>
+GCAGAAUGAGGCUAGAGCUGAG<miR-1807>
+CUGGGAGAAGGCUGUUUACUCU<miR-30c-3p,miR-30c-2*,miR-30c*>
+GGCUACAACACAGGACCCGGGC<miR-187*>
+UGACAGAGGAGAGUGAGCAC<miR156e>
+ACACUCUCUCCGUUUCCCUUC<miR1023e-5p>
+AGUCUGUGAUACUGUGGUAGC<miR-2230*>
+AAUACAGCCGCAUGAUUAUUCA<miR-2539*>
+GCUCUCUAUGCUUCUGUCAUC<miR157d*>
+CUAAUAGUAUCUACCACAAUAAA<miR-633>
+UGUGACAGAUUGAUAACUGAAA<miR-542,miR-542-3p>
+AAUUGCACUUUAGCAAUGGUGA<miR-367>
+UAACCUGAUCAGCCCCGGGGUU<miR-rL1-1>
+CGCCUGACACUUUCGUCUCAACCU<miR-87*>
+GGGGCUUUGGGGAGGGAGGGGA<miR-762>
+UUGCUUGAACCCAGGAAGUGGA<miR-1273e>
+UUGAGCAAUGCGCAUGUGCGG<miR-233>
+CAGUGCAAUGAUAUUGUCAAAGCAU<miR-301b>
+AUAAAGCUAGGUUACCAAAGAU<miR-79>
+CUGGAUGGCUCCUCCAUGUCU<miR-432*>
+CGUGUUCACAGCGGACCUUGA<miR-124*>
+UCAGCAGUUGUACCACUGAUGUGU<miR-1992>
+UGAGGUAGUAGUUUGUGCU<let-7i>
+UACUGGCCCCUUAAGUCCCGGUUG<miR-193>
+CGGAUUGACAUGGUGUCAGA<miR-4099-3p>
+GGUUCGCCGUGCCGCCGCGC<miR-1621*>
+GUAAGGGAAGAGGGUGGUAUUU<miR-2550*>
+CUACCCUGUCUUUAAGCUG<miR-4069-5p>
+AGCUCCUCGAGGCCAGAGCCC<miR-339-3p>
+UGUCAUGGAGUUGCUCUCUUUU<miR-281>
+AGGUCAUUUCAAAGAGGGCUG<miR-2427>
+GAAUCGAUGGUUAAACAACAC<miR4225>
+UGACGUGUCUUCUAUUUUUAGGGA<miR478b,miR478c,miR478a>
+UUUUUCCUAAAGCGUGCCCGGGUUA<miR-H7-5p>
+UAAAUGCAUUUUCUGGCCCG<miR-277>
+UGCUCUGCCUCAUCCUUGUCU<miR408>
+GGUGGUAAUUGCAUAGGGG<miR-4137-3p>
+UAUGUGCCUUUGGACUACAUC<miR-455>
+UCCAGUUUCUAUUUCACGGACGUCA<miR-3396>
+GAGCCAAGAAUGACUUGUCGG<miR169aa>
+CACCAACCUCUCAUCGUUCCC<miR839>
+AUCCCACCACUGCCACCAU<miR-1260b>
+UCAAGUUCGCACUUCCUAUACA<miR-BART18-5p>
+UGAUCUAGUCAAAGCCUGACAGU<miR-344c>
+UACAAACAAAGCAUUUGUUUGA<miR-2831>
+UUCUAGAUUAAGCCGUUGGAA<miR-2813>
+AUCCCUUGCAGGGGCUGUUGGGU<miR-623>
+UAUGUCUGCUGACCAUCACCUU<miR-654,miR-654-3p>
+UCACAACCUCCUAGAAAGAGUAGA<miR-67>
+AGUAGUAAGAGAUCAGUUGGAUA<miR-3025>
+UACUCCAGAGAGUAGCAAUCACG<miR-510>
+UAUUGCACACCUCCCGGCCUAU<miR-310>
+ACAAUCCAACAAUGCAGGCGC<miR2085>
+AGCAAAAGCUAAGGAAAAGGAA<miR855>
+AGAUUGGGGUGAGUUAGGGUG<miR-2195>
+UUGUAAUUGCCGGUAGCACUGA<miR1153.2>
+CUCUCAUGGGACUGUGUGCAGC<miR-1697>
+UACCCAUUGCAUAUCGGAGUUG<miR-660>
+AGUGUCUCCUGAUGAUCGGGACAA<miR440>
+GGGAGUCGGUCCUGCCGGCCA<miR-2415*>
+UUGCUGGGGUAGUCUUUAGG<miR-3078*>
+UUUCCUCAUAUCCAUUCAGGAGUGU<miR-670*>
+AUAAGAGCUGUUGAAGGAGUC<miR2937>
+CAGCGGUGAUGAUAAUAC<miR-4185-5p>
+CUGUACCCUCUCUCUUCUUC<miR529,miR529a>
+UCACCGUUUCAUCCCCACGAUU<miR-rL1-22>
+AGGCAGGGGCUGGGCCUGCAGC<miR-346*>
+UAUUGCACUUUCCCUGGCCAGA<miR-235>
+CAUGUUGACAUCAUCCAAUAUA<miR3631b,miR3631c,miR3631d,miR3631a>
+UCAUAUUUCGCAUUGUUGACG<miR-2807c*>
+UGGAAGGGGCAUGCAGAGGAG<miR528b,miR528a,miR528>
+AAGAGAGCAGUCUAUUGACAGU<miR-47*>
+UUCUGCUCUUAUUGAAAUCAGU<miR-1784*>
+AAACUGGCAUUCCCGUCUUACUU<miR-2498>
+ACCAGGAGGCUAAGGCCCCU<miR-665>
+CGGACUGCCGCAGAAUAGCUU<miR-M2-3p>
+AUGGUAAUGGUUCUCUUGCUGCU<miR-451*>
+AAAGAUCUUUAGUCCCGGUUGUUC<miR2120>
+GAGUUGUAGUCUUUCAAACAGA<miR-1805-5p>
+AACCCGUAGUUUCGAACAUGUG<miR-100a>
+UUUGUUUUAAGGCUUCAUUUUCU<miR-4072-5p>
+CGACAGCACGACACUGCCUUCA<miR-196b*,miR-196b-3p>
+CCGUUGCCAGCUGCUGUGCGUA<miR-2845>
+UGGGUUUGUAAUGUGGUCAUG<miR-2696>
+AUACUGCAUCAGGAACUGAUUG<miR-217>
+UAGCCAAGGAUGACUUGCCGG<miR169b,miR169p,miR169j,miR169e>
+UCCCACCGCUGCCACCC<miR-1280>
+AACUGGAUCAAUUAUAGGAGUG<miR-1243>
+UUCACAAGGAGCUGUCAUUCAU<miR-513b>
+UCAAUUGGUAUCAGAGCAACG<miR845b*>
+UGGGGUGGGAGGUUGGUGUGUG<miR-1331>
+GGAGGAACCUUGGAGCUUCGGC<miR-3928>
+GGCUUCCGUGCCUGCAGAUGUCU<miR-2331>
+UAUCCUUUCAUAGGUUCUUGAUUUG<miR-3377*>
+AGAGUCUUGUGUUGUCUUGC<miR-924>
+GGCGCGGGCGCUGGACGCCUCG<miR-1893>
+CGGCACCUAAUUGAAAUGCCCGCC<miR-2495*>
+GAAAUCAAGGGUGGGUAAGACCU<miR-551*>
+UGAAAGACAUGGGUAGUGAGAUG<miR-71>
+UGCGUAGGCGUUGUGCACAGUG<miR-242>
+UCACCGGGUGAAAAUCAGAGC<miR-35d>
+UCUUGCCUACUCCUCCCAUU<miR482.2>
+GGAGGCAAGAUGUUGGCAUAGCUG<miR-31>
+UGCAGUGCGGAACGAGGCUAA<miR-2785>
+AAUCUGGAAGUCAGCACAUGCU<miR-1705>
+GGGGGCCGAUGCACUGUAAGAGA<miR-128-2*>
+CCUAUUCUUGAUUACUUGUUUC<miR-26a-2*>
+AUGUAGGGCUGAAAGCCAUGGG<miR-135b*>
+GGUCUAGGUGGAGUUGGAAAAA<miR3704>
+CUAAGUUUGUUUGAAGCA<miR-4122-3p>
+UGUUCCUCUGUCUCCCAGAC<miR-4326>
+GAAAGCCACCAUGUUGGGUAAA<miR-742>
+AGCAGCAUUGUACAGGGCUAUC<miR-107>
+UUUGGCAAUAGAUAGAAUUCACA<miR-182>
+AAAGUGCUUCUCUUUGGUGGGU<miR-520d-3p,miR-520d>
+CAUUGCACUUGUCCCGGCCUAU<miR-92a>
+UUUUGUAUGAGACGCAUUUCG<lsy-6>
+ACUAGGUAGUCCUUGAUUACA<miR1047-5p>
+GUGUUGGAGUUGGGUUUGU<miR-4121-3p>
+UGAGGUAGUUGUUUGUACAGUU<let-7j>
+ACUGCAGUGAAGGCACUUGUA<miR-17-3p>
+GCUAUUUCACGACACCAGGGUU<miR-138-2*>
+CCCCCCUUCCUCUGGAAAAA<miR-2326>
+AGUUGUGUGUGCAUGUGCAUGUGU<miR-669f-5p>
+AAUUUAUUGCAGCCUUCUCAGGGU<miR-1460>
+AGGGGUCUGGACGUGGGUGGGC<miR-H22>
+UACCCAGAGCAUGCAGUGUGAA<miR-1912>
+CACUAAAAUGAGGGACAGAG<miR-4200-5p>
+GCUCGACUCAUGGUUUGAACCA<miR-434-5p>
+UUGACAGAAGAGAGAGAGCAC<miR156c,miR156b>
+CUGCUGGGUCGGGGCAUUAACA<miR-1000*>
+GGAAUGGGUGGCUGGGAUCUA<miR3633b>
+AGGGAGAGCAGGGCAGGGUUUC<miR-504*>
+CAGUCACUACCACACUGCCAC<miR-449b*>
+UUAUAAUACAACCUGAUAAGU<miR-374a>
+CCGCCCUUCGUCUUGACUGGCG<miR-2766*>
+GUGAAAUGUUCAGGACCACUUG<miR-203b>
+CACGCGUCACGUGACAUCG<miR-4070-3p>
+UAUUGACUUGGCUCAUCUCUC<miR171g*>
+AAGGUUAUGUGUUAGCUCAAG<miR-872>
+UGGAGUCACUACCAGUGCUGUG<miR-1685*>
+AUGCAGAAGUGCACGGAAACAGCU<miR-2131>
+CAUUGUCUUCAUUUGCCCUUGC<miR-rL1-33>
+GGUAAACUGCACAUUGUAUCGCU<miR-3307>
+AAAAGUGCUGUUUGUGCAGGUA<miR-93>
+CAAAACCACAGUUCCUUUUGC<miR-548f>
+CUAGGUGGUUUUUUCGAUGAAGGU<miR-1486>
+UGAACACAGCUGGUGGUAUAUCAGU<miR-317>
+UGACUAGUUUGCGUGUCAAACUCG<miR-3361>
+AGAGAUUGGAAAUGUACUUUUUG<miR-2833>
+CACAGUUGCUGUUUCUUUUA<miR-994*>
+AUUCUAAGACGGUUAUCUGGGACC<miR4405>
+UUUGUUUUCCUCCAAUAUCUCA<miR2275a-3p>
+CCGGACCAGGCUUCAUCCCAG<miR166,miR166c>
+GCUCGAUGAUGAUCUUCC<miR-1417>
+GCUGACUCCUAGUCCAGUGCUC<miR-345-5p>
+AAUGACACUGGUUAUCUUUUCCAUCG<miR-229>
+AUCCCUUACUCACAUGAGUAGUC<miR-1729>
+AACCCGUAGCCUUACUAUCCGG<miR-2271>
+CAGUGCAAUGUAAAAAGGGCAU<miR-130a>
+UAAGAUAAUGCCAUGAAUUUG<miR1428e-3p>
+AGAGCUUGUGUCUAGGGCUG<miR-2401>
+CAACGGAAUCCCAAAAGCAGCU<miR-191>
+AGGCACGGUGGCAGCAGGC<miR-564>
+UCCUUCUAAUGUGUUUUUCG<miR-71b*>
+AAGGGCGUUAAAUGAAGACUUAG<miR-2780c>
+CUACAGUAUAGAUGAUGUACUC<miR-144>
+ACCUGAGGUUGUGCAUUUCUAA<miR-544b>
+CUGCGCGGCGGAGACCGGGAC<miR-H25>
+CAUAAAGUAGAAAGCACUACU<miR-142a,miR-142,miR-142-5p,miR-142a-5p>
+UGUGGUCUUCAUGCCAUGAUUUU<miR-1818>
+UAGCACCAUAUGAAAUCAGUGUC<miR-29d>
+AGAGUAGUAGGUUGCAUAGUA<miR-352>
+UGACCGAUUUCUCCUGGUGUUC<miR-29c*>
+UGCAUCACGUGUAACCUCCCUA<miR-1421ad*>
+AGGCAGCGUGGUGUAGUGGAUA<miR-885>
+UUGGCAGGGAGGUCCUCCACAC<miR4229>
+UACUGAAACUGUGCUCGUGGUGU<miR-2311>
+UGUGCUUAUUUGUAUAUUGC<miR-2162-5p>
+AGUCAGGCUCCUGGCAGGAGU<miR-344g-5p>
+CGGCCUUCAACGACUAUAUCAAC<miR-90b*>
+UCAAACAGAGCGCCAGCGCUAU<miR-2839*>
+UGCUGGAUCAGUGGUUUGAGUC<miR-1287>
+UUCAAGUAAUUCAGGAUAGGU<miR-26b>
+CCACAGCACUGCCUGGUCAGA<miR-383,miR-383*>
+CAAAGUGCUCACAGUGCAGGUAG<miR-20b>
+CUCACCUGGAGCAUGUUUUCU<miR-1983>
+UGGCGAACACAGAAUCCAUACU<miR-541*>
+UACACUGUAGAAUAGGCUUGU<miR-10c-as>
+UCACCCUAUGUUCUCCCACAG<miR-1982.2>
+ACUUGGGCACUGAAACAAUGUCC<miR-635>
+UUGCAUAGUCACAAAAGUGA<miR-153>
+GCAGUCCACGGGCAUAUACACU<miR-455*>
+UAGAACUUCGUCCCAAC<miR-449c-3p>
+UCUGGGCAAAGGUAAAUGUAUG<miR-1476-5p>
+CCUCUUUCCCUGUUGCACUACU<miR-130b*>
+CACAGCGCAUACAAUGUGGAUU<miR-460a*>
+CUGCAUACGAGUAGACCCUUUC<miR-3536>
+CAUCACAGUCUGAGUUCUUGCU<miR-11>
+UGACGAGUCUUCUAUUUUUAGGGA<miR478e>
+UUGCAUCCUCUGCACUUUGGGCCU<miR2877>
+UAGCCAAGGAUGACUUGCCUGC<miR169j,miR169e,miR169h,miR169k,miR169g,miR169i,miR169l>
+CGAGCAAAAAUCAUUGUUGAU<miR3436>
+GGCAAGUUGUCCUUCGGCUACA<miR169b*>
+UCCUUCAUUCCACCGGAGUCUG<miR-205a,miR-205>
+UGGAGAUCCUCCUGUCCGGCU<miR1148.2>
+GGGACCCGGGGAGAGAUGUAAG<miR-711>
+CCCAAAAGUUCGUUCGGGUUU<miR-2284h>
+AGGUUGUCCAUGGUGUGUUC<miR-496*>
+CUACAAAGGCAAGCACUUUCUC<miR-524>
+UGAGAUUCUUCUAUUCUACUUU<miR-958*,miR-958>
+AGGGGAAAAUGCCUUUCUCCCA<miR-3092*>
+UUAGUGAAGGCUAUUUUAAUU<miR-3606>
+AACAGUAAGAGAUUAUGUGCUG<miR-2184>
+AUUGGAUGAAUCCUACCCGGUGAG<miR-3478>
+CAGGCAGCGCGGGGCUGCUGG<miR1144a.1>
+UCAGCUGUCAUGAUGCCUUC<miR-1989>
+GCAGGUGCUCACUUGUCCUCCU<miR-764>
+AGUUUUGCUGGUUUGCAUUCAG<miR-19b*>
+UCUGGCCUUGACUUGACUCUUU<miR-3922>
+UGGCAGUGUGGUUAGCUGGUUGU<miR-34>
+UAUUGCACAUUGGAAUGGUA<miR-367-3p>
+ACCACUUGUGAAUCUCCAAC<miR-1497*>
+UCGGAGUAUGGGUUGCGAUGG<miR3464>
+ACUGGAUUCCAUGAAGGGAUGUGA<miR-336*>
+CGGUUGGUGGGCGUGAUCAGC<miR906-5p>
+UACGGUUUCCUAGAUUGUACAG<miR-BART8>
+GUGUGCGGAAGUGCUUCUGCU<miR-147b>
+AACCCUGUGGAUCCGAUCUUGUGU<miR-10b>
+UGCCCUACUAUUCGCAUCUCAUC<miR-58b*,miR-58a>
+GUAUGCCGGAGGUUCACUAGCGACU<miR-2556*>
+UCUGGCAAGUAAAAAACUCUCAU<miR-3128>
+UCAGCAAACAUUUAUUGUGUGC<miR-545>
+UAUUGGGAACAUUUUGCAUAA<miR-450a*>
+AAACAUGAAGCGCUGCAACAC<miR-322*>
+UCCCUGUUCGGGCACCA<miR-1274b>
+UACCCGUAGCUCCUUGCCAUGUU<miR-51>
+GAGCUUUCUUCGGUCCAAUA<miR319d.1*>
+GCUUCUGUAGUGUAGUC<miR-3182>
+AGGUUGGGAUUUGUCGCAAUGCU<miR-92a-1*>
+UUGGUCCCCAUCAACCAGCA<miR-133b-3p>
+AUGGGUCCGAUCGGGAAGCU<miR1146>
+UUUUCCCUACUCCACCCAUCCC<miR472a>
+CAUCCCCAUUCCACUCCUAGCA<miR-2954>
+UGAUUGGUACGUCUGUGGGUAG<miR-509-3p>
+UCCCAAAUGUAGACAAAGCA<miR158a>
+CCCCUCGGCGGUGUGCACGG<miR-M19-5p>
+UGCCUGGGUCUCUGGCCCACGCGU<miR-661>
+UUAUUUCAGUAGACGACGUCACA<miR3947-5p>
+GAGCCAAGGAUGACUUGCCGC<miR169o>
+UCACAGCCAAAACUGAUGAUCU<miR-2c-3p>
+UGAAAUGUGUCCUCUAUCCGGCUC<miR-3384*>
+UACAGUAGUCUGCACAUUGG<miR-199*,miR-199c>
+UCCGGGGCUCAUAACCUGUUA<miR1151b>
+UGGUGGAUUAACUGUUGCCA<miR-2548*>
+AACGGGUGACUGGUUAGACAA<miR-552>
+CUGAAGGAGUUCAUUGGUACA<miR1222c,miR1222b>
+UAGCAGCACAAAAAUAUUGGCA<miR-195>
+UUAGGUUUCGUUGUUUGUAUUU<miR-3484-5p>
+UCUAACUCGUCGGUAGUCAUUGUU<miR-63>
+AUCCUAUGUGCUGUGGCUUAUG<miR-2543b*>
+CCAAUUACCACUUCUUU<miR-4275>
+UCAGUGCAAUCCCUUUGGAAU<miR393b-3p>
+GGCUGCAGCGUGAUCGCCUGCU<miR-666-3p>
+UUGAAGAAUUGCAGGUGGUGGAU<miR-1497d>
+AACAGGUUAUUCGCGGUGCAGU<miR-1421ad>
+GCUGGUCAAACGGAACCAAGU<miR-133b*>
+AGCUGGUUGAAAUUGGGCCAAAU<miR-133*>
+UGAGUGUUGUCUACGAGGGCA<miR-3659>
+UCCACUAUGGACUACAUACGGAG<miR1126>
+UUCGUGAUCAAGCCUGACCCCUUAAU<miR-2843-2*>
+UAUAGUUUUGUGUGGUUUUU<miR-2371>
+GCCUGGAGCUACUCCACCAUCUC<miR-4254>
+UUUAUUGAUAUUGCUAAUAGAU<miR2677>
+AGUCAGUCUCCUGGCUGGAGUC<miR-344f-5p>
+CAACCACUAUCCGCCCUGCCGCC<miR-34*>
+UGGGUUUACGUUGGGAGAACU<miR-629>
+CAAUGCCUGCGGAGAGAAAGA<miR-M18-3p>
+AAUGUUGCUCGGUGAACCCC<miR-409-3p>
+ACACACAGUCACUAUCUUCGA<miR-672*>
+UUCAAGUAAUUCAGGAUAGGUU<miR-26b>
+UGAUAUGUUUGAUAUUGGGUU<miR-190b>
+CAUUGCACUCGUCCCGGCCUGA<miR-92b>
+GGAUUCCUGGAAAUACUGUUCU<miR-145*>
+UAAUACUGCCUGGUAAUGAUGAC<miR-200b>
+UCUCUGGCUAACUAGGGAACCCA<miR-TAR-3p>
+GAGAGCACCUCGGUAUCUAAGC<miR-306*>
+UAUUGGAUCUCAGUUGAACCGGUC<miR4383>
+UUGCUGAAGUUACAUUGGGAAGUGA<miR-3266>
+UUGGCACUGGAAGAAUUCAC<miR-263b>
+AGGUCAUCCUGCAGCUUCAGU<miR167d*>
+UGAGGCAGUCGAUUGAAU<miR-1827>
+UUUGGCAAUGGUAGAACUCACA<miR-182>
+UGGUUUCCCUGGCCAAUCCACU<miR3440*>
+AAGUGGCAUUUGAUAAGCCAUC<miR-2212*>
+UGAUAAUGAAUUCUUUGGAUG<miR-2243>
+UCACUGGGUGCAUGAUGAUUGU<miR-2733a>
+AUGUAUGUGUGCAUGUAUGCAUG<miR-297>
+UACUCCGGAGAGUGGCAAUCACA<miR-510>
+UUAGUAGGCGUUGUGGGAAGG<miR-253>
+UAAAUGAUUUAUAUUUACAG<miR-4204-3p>
+GUGCAUUGUCGUUGCAUUGCAU<miR-33>
+UACUUUAUCUUGGUAAUUGGUUGUC<miR-3308>
+UCGGACCAGGCUUCAUUCCCU<miR166m,miR166d>
+CAGUAGUGAAAUGGGAGUCCAUGU<miR-3230>
+UAGGGUAGGAGGAGAGAGGUGU<miR-1759>
+UCUUACCAGACAAAGUUAGAU<miR-429*>
+AAAAGUUUUGGGUCAUAACAUA<miR-2156a*>
+AGUAUUUAUUGUGGACCUUG<miR-124-1*>
+CCGCGCAGCAUGUGACCUUCCU<miR-1421b>
+UUUAGGCAGAGCACUCGUACAG<miR-1948>
+GGGGAGCUGUGGAAGCAGUA<miR-920>
+AGCUGAGAUGGUUAGGACAU<miR-3483-5p>
+UUCGUAGACCCUGCCCUCCU<miR-2425*>
+UCGUACCGUGAGUAAUAGUGCA<miR-126b>
+UCACAACCUACUUGAUUGAG<miR-307>
+ACUUGGCUGAUUCUAUUAUU<miR3434>
+AAAGUGCUUCCUUUUAGAGGG<miR-520b>
+CAGAUCUAACUCUUCCAGCUCA<miR-750>
+UCAGGUACUGGAUGACUCUCAG<miR-306>
+UCUUGUGUUCUGUAGAUCAGU<miR-581>
+UUUCAAGCCAGGGGGCGUUUUUC<miR-498>
+CAAAAGCUGUUGGGUUUGGCUGGG<miR474c>
+UUCCUGUCUACUUGAAGCCAC<miR1051-3p>
+CAUUGUUUCUUGUUUUUUUCA<miR837-5p>
+UGAUUCAGAGCACAUUCUCAG<miR-2269>
+UUGUGUGGUUUUGGAUGUCUG<miR-2470>
+CCUUGUAGGAGUAAAGGGAA<miR-4078-5p>
+UCGUUUGCCUUUUUCUGCUU<miR-1282>
+CCCAGGGCAGAGCAGUGUGAA<miR-3594-5p>
+UUCACAGUGGCUAAGUUCAGUG<miR-27e>
+UGGCAGUGUAUUGUUAGCUGGU<miR-449a,miR-449>
+UCCUUCUGCUCCGUCCCCCAG<miR-1237>
+UCAGCGUUGCAUUCAAUUAUG<miR397b*>
+CUUCUUGUGCUCUAGGAUUGU<miR-578>
+AGCCGAAUGAAUGAAAGUGGGA<miR-1373>
+UCUCGUUAUAUCUGACGUCGGGGAA<miR-3022>
+ACUUGGGCCAGGGGAAUUCAAACU<miR-375*>
+CACUGCAUACCCUGUGACCUCC<miR-1421h*>
+AUCAUAGUUAAGAGCUCAAAA<miR-2841>
+CAAAGUGCUGUUCGUGCAGGUA<miR-93>
+GAUACUACGUGGUUGGUGAUUC<miR-3575-3p>
+UUGGGAACAUUUUGCAUCCAUA<miR-450b-3p>
+UGGAAGACUUGUGAUUUUGUUGU<miR-7b,miR-7>
+AGGGUUUAUCCUGUCUGCCA<miR-4008a-3p>
+GCACUGGGUAAAGUUUGUCCUA<miR-309>
+UCACUGUUCAGACAGGCGGA<miR-1208>
+UAAAUGCAUUAUCUGGUAUGUA<miR-277a>
+CCUGCAUUGUACACACUGUGCG<miR-460-5p>
+GCUUAUGGCUUCAAGCUUUCGG<miR-879*>
+UACAGUGAUCAGGUUACGAUGG<miR-1329>
+CGGAAAACUCGCUCGUGCCAUCGU<miR-2147c>
+UAAACUAAUCACGGAAAUGCA<miR420>
+UGAGGCAGUAGAUUGAAU<miR-1827>
+CUUCCCCGGUCAGGGCUCGGC<miR-2373>
+AGCUGCCUGGUAAAGAGCUGUC<miR-745a>
+UUCCACGGCUUUCUUGAACUU<miR396g,miR396c,miR396b>
+UGCCUGGAACAUAGUAGGGACU<miR-3116>
+UGGAAGGGAGAAGAGCUUUAAU<miR-3202>
+ACUGGAUUCAUUUCUCUGAAA<miR-2299-5p>
+CUGGCAGCACGUAGGAGCAGG<miR-1575>
+CAGGCUAGGAGAAGUGAUUGGAU<miR-664-5p>
+CCCAAAGGUGAAUUUUUUGGGA<miR-186*>
+UAGCCCCGCUGUGCUACUGCUG<miR-1595*>
+AACCCGUACAACCGAACUUGUG<miR-100>
+AGAUAUGUUUGAUAUACUUGGU<miR-190>
+GUAUUAGUUGUGCGACCAGGAAA<miR-230>
+UAUUGCACUUACCUUCGCCUUG<miR-3479-3p>
+CUCGGUACGGACGGGGAACCGU<miR-M23-1-5p>
+CCUCUCUGUGCUGCCAUUUGGGAC<miR-2196>
+CUUGGAGUGAAGGGAGCUCUC<miR159b,miR159a>
+UGUGAUGUGACGUAGUGGUAC<miR-989>
+CCCAGGGAGUCUGAGGGGG<miR-1356>
+CCGUGCUUCCUUACUUCCCAU<miR-1*>
+UAUAUGAAGAUGUAAGCUAU<miR-4039-5p>
+UGAAGCUGCCAGCAUGAUCUC<miR167c>
+CUAAGUACUAGUGCCGCAGGAG<miR-252,miR-252a>
+UUUUGUCUGUAUCGCGAAGUUUGG<miR-2528>
+AGGAGGCAUCUUGAGAAAUGGA<miR-3612>
+GUGCCUACUGAGCUGAAACAGU<miR-24-2*>
+AAAUUAUUGUACAUCGGAUGAG<miR-944>
+UUGCAUAGUCUAUUAAGUUGGU<miR-2163-3p>
+UAGCCAAGGACGACUUGCCCA<miR169af,miR169ae,miR169ac,miR169ab,miR169ad>
+AGGGAGCGCAGCAAGAAGAGA<miR-1375*>
+ACCCACGUAUUCGAUCUUGCG<miR-1473*>
+AGAGGCUUAUAGCUCUAAGCC<miR-879>
+CUCACAGUCUGCACAGCUCUC<miR533c,miR533a,miR533d>
+UAAUAGCCAGAAGCUGGAAGGAACC<miR-3472>
+CUGCCUAACAAUGAACUACC<miR-3566>
+GGGGCCUGGCGGCGGGCGG<miR-2861>
+UUCAUCCUUGCAAUUAGGGGUC<miR2668>
+UCAGUCUUUUUCUCUCUCCUAU<miR-14>
+ACCAAUAUUAUUGUGCUGCUUU<miR-16-2*>
+UACAUGUACAUAUAAGUUGAAUUC<miR-2173>
+UCAAUAGAUUGGACUAUGUAU<miR860>
+AGAGGAGAAGAUCAGCCUGCA<miR-1253>
+UGAAUCACACAAAGGCAACUUUU<miR-377>
+GAAGUUCUGUUAUACACUCAGGCU<miR-148b*>
+UGUGUGGUUUGUUUGGCCUC<miR-2405>
+CAGUACUUAUGUUAUGCUCUCU<miR-12*>
+UGACACGCCACGUGGCACACU<miR2631>
+ACGGGUAUUCUUGGGUGGAUAA<miR-137*>
+UGUCAUGGACUUGCUCUCUUUGU<miR-281>
+AAGAAUUGCGAAUGGUCAUCA<miR-219*>
+AGGGACAAAUUGCUCUCUGGAAG<miR-1590>
+GUGACAUCAUAUGUACGGCUGC<miR-489>
+UGAGGUAGUAGGUUGUAUAGUU<let-7a,let-7,let-7j>
+UAUUGCUUGAGAAUACACGUGA<miR-137>
+GUAAAGGCUGGGCUUAGACGUGGC<miR-1981>
+CGCCAAAGAAGAUUUGCCCCG<miR399j>
+UGGAUUUCUUUGUGAAUCACCA<miR-876-5p,miR-876>
+GUACAUGAUGACUAAAAUUUCU<miR-1434*>
+UGCCUGGCUCCCUGUAUGCCG<miR160f,miR160e>
+UCUUGGAGUAGAUCAGUGGGCAG<miR-432>
+CUGGUACAGGCCUGGGGGACAG<miR-150*>
+GUGCCCAGCGCUGCAGGGCA<miR-4335>
+UGGAACUUGCAUGAACAGGC<miR-4001b-5p>
+UGGUGAAAAAUAUGAAAAAUC<miR1046-3p>
+UCAGGGAGUCAGGGGAGGGC<miR-4270>
+GACUUAUAAUAAUCUCAUGAA<miR400*>
+UCAUUGAGUGGAGCUUUGAUG<miR397c>
+UGAAGCUGCCAGCAUGAUCUGA<miR167g,miR167b,miR167,miR167a>
+UCACUCCUCUUCUUCUUGAUG<miR847>
+CUGAAAAUGUUGCCUGAAG<miR-694>
+ACUUCACCUGGUCCACUAGCCGU<miR-412>
+UAUUGCACCUGUCCCGGCCGAU<miR-92c>
+UGGCAAGACUAGGCAGUCCAG<miR-74b>
+AAUUGCACUGUUCCCGGCCUGC<miR-92b>
+AUUCCUAGAAAUUGUUCACA<miR-384>
+UAAGUGCUUCCAUGUUUUAGUAG<miR-302b>
+CAAUAGGUCUUUAAUCAUUG<miR-4041-3p>
+AUUGGAUUGAAGGGAGCUCCA<miR159c>
+UCAACAAAAUCACUGAUGCUGG<miR-3065>
+UUAUCAGAAUCUCCAGGGGUAC<miR-361,miR-361-5p>
+UGUGAGGGUGGUGGACGGCAGGG<miR-2309>
+UAGGUUAUCCGUGUUGCCUUCG<miR-154>
+AGGCCGGCGGAAACUACUUGC<miR-2796>
+UGGCAGUGUGGUUAGCUGGU<miR-34>
+AUCACAUUGCCAGGGAUAACCA<miR-23b>
+GAAGCAGGGCGGAACGAUGUGU<miR-2286>
+CUGAGCCCCUGUGCCGCCCCCAG<miR-1225-3p>
+UAUAGAACUGAGCAACAGGUAA<miR-2544>
+GGCCUCAUUAAAUGUUUGUUG<miR-421>
+UCUGAGUCCCGGUCGCGCGG<miR-1199>
+CCAGUAUUAACUGUGCUGCUGA<miR-16a*,miR-16-1*>
+UUUUAUACAAGAUUAGCC<miR-4179-3p>
+GGGAUUCUGUAGCUUCCU<miR-4320>
+GGGCAUCUGCUGACAUGGGGG<miR-680>
+UAAAUAGCCCCGAUUUGACAG<miR-H16-3p>
+AGAGAGAUCAUUGGACUUACAG<miR-1018>
+UCAUAUUGUUUCUUAAUUAAACUGC<miR-3232>
+CGGUGAAGCGACUGUUGCCUCGA<miR-m01-3>
+GUCCGCUCGGCGGUGGCCCA<miR-572>
+CAAGAACCUCAGUUGCUUUUGU<miR-548b-3p,miR-548b>
+ACUUAAUCUGGACACUAUAAAAGA<miR1878>
+UGGAACAUGUACGUAAGGGC<miR-4006b-5p>
+UGAGCUGCUGUACCAAAAU<miR-558>
+ACCAAUAUUAUUGUGCUGCUU<miR-16*>
+CCUGGGUUUGAGAUAAUUGAC<miR869>
+CCUGUGAAAUUCAGUUCUUCAG<miR-146a*>
+ACAGGUGAGGUUCUUGGGAGCC<miR-125a-3p,miR-125a>
+UGAGAACUGAAUUCCAUAGGCU<miR-146b,miR-146b-5p>
+CGGCAUUGUGGACCUAAGACC<miR1028b-3p>
+AGAGGAAAGCUGGACGGCAAGC<miR-1841>
+CGGUACGAUCGCGGCGGGAUAUC<miR-243>
+CGGGAUCACUAUCAUUGUGA<miR-4045-3p>
+UGGAGAAGCAGGACACGUGAG<miR164e,miR164c>
+UCCGAACGCUAGGUCGGUUCUC<miR-US25-1*>
+ACGUGUGUGUGCAUGUGCAUGU<miR-466f>
+AGUCAUCAUACUCUCAGUUGAUA<miR-2733j>
+AACAGGUUACACGUGAUGCAGU<miR-1421v>
+GGGAGCCAGGAAGUAUUGAUGUU<miR-505-5p,miR-505*>
+AAAUCUGACCGAAGACUACGA<miR-3379>
+AUUUGUUAAUCCUCCUCCGUGCGUC<miR-3358>
+GAUCAUGUUGCAGCUUCAC<miR167h*,miR167i*>
+UAUCACAGCCAUUUUUGACGAGU<miR-13b>
+CGAUCGCACCUUUGGCCGGCCGG<miR-rR1-1>
+CGAAGAAAAUGAAGUCGUUUU<miR3441.2*>
+CGGUUUAAGGUCUUGGAGACAAAG<miR-2332>
+CUGUAUAGCCUGCUAACUUUCC<let-7*>
+GGUCAAGAAAGCCGUGGGAAG<miR396e*>
+UAACAGUCUACAGCCAUGGUCGC<miR-132>
+CGAGUCAAGGAUGACUUGCCG<miR169t>
+UGCCAAAGGAGAGUUGCCCUA<miR399,miR399j,miR399b,miR399i>
+UCACCGGGUGAAAAUUCGCAAU<miR-36>
+AGCUCGUGUCCCAAGGCGCCU<miR-2198>
+CAGCUAACAUGCGACUGCUCUC<miR-449a*>
+AUCUCGCUGGGGCCUCCA<miR-720>
+UACCUGUGCACCUGUGUGCCCA<miR-2017>
+UGGAAUGUUAAGAAGUAUGUA<miR-1b>
+UUUGUUCGCCCCGGCUCGUGUCG<miR-375*>
+CAGUGGGCCGUGAAAGGUAGCC<miR-3061-5p>
+UCUCCCUCAAAGGCUUCCA<miR477h>
+UACGUGUGUGUGCAUGUGCAUG<miR-466f-5p>
+AACAUUCAUUGCUGUCGGUGGGU<miR-181b>
+CUUUGGAUGGAGAAAGAGGGGG<miR-1897-5p>
+AUUUGAUUAUUUUGUGGGU<miR-4111-3p>
+UAGACGGUUUGAAACAUGGA<miR-3498>
+AGGAAUGUAGAAUUAGGAAUUCGG<miR-1498>
+ACCUCUCCAUCAUGCAUGACA<miR-2015>
+AGUUUUGCAGGUUUGCAUUUCA<miR-19b-2*>
+CAAAGCGCUUCUCUUUAGAGUGU<miR-518c>
+UAAGGUGAAUAUAGCUGCCCAUUG<miR-rL1-8>
+GUGGGUAUAUUAGGAAGCUU<miR-4083-5p>
+UAAGUGCUACAUGUUGGGGUAG<miR-430c>
+AGACCUGGCCCAGACCUCAGC<miR-631>
+UAGCCAAGAAUGGCUUGCCUA<miR169p,miR169m,miR169q,miR169n>
+UUCGUUGUCGUCGAAACCUGCUU<miR-981>
+GUGGUUAUCCCUGUCCUGUUCG<miR-487b>
+GCUCUCCCUCAGGGCUUCCA<miR473b>
+UGAUUGUCGCCUUUUUGAGUAGA<miR-508>
+UAGACUUUUUAGAUGUUGGUCAA<miR-3339>
+UGUUUUGUGCGUGACUCUAAUU<miR403*>
+AAAGUGCAACCAGAUUGGAUGA<miR-1347>
+AACAGAGCAGAAACAGAACAU<miR415>
+UACAUAUGACUGUUUAUAACACU<miR-3225>
+UACAUGUAUAGUAUUAUUUGCCU<miR-2172-3p>
+CCUUGGAGAAAUAUGCGUCAA<miR861-5p>
+GUUCCUUUCAAACACUUCACAU<miR395m*>
+UCGCGGUCACAGAAUGUGACA<miR-K12-3*>
+GGUCAUGCUGUAGUUUCAUC<miR167g*>
+UCACAGGAGAGCCAUUUAGAGUUU<miR-3264>
+AAAGUGCCGCCUAGUUUUAAGCCC<miR-290-3p>
+CUGAAGUGAUGCAUGACUGAUCAG<miR-573>
+AACAUCCUGCAUAGUGCUGCCA<miR-448*>
+CUGGGAUCUCCGGGGUCUUGGUU<miR-769-3p>
+UUGCGUAGGCCUUUGCUUCG<miR-242>
+UGAUGUGUGUGUGCAUGUACAUAU<miR-466c-5p>
+UUAAGGCACGCAGUGAAUGCCA<miR-124b>
+UGUGGUAUUGGUUCGGCUCAUC<miR479>
+AAACUACUGAAAAUCAAAGAU<miR-606>
+AACCGCUGUUUAGGCGGAGUGG<miR2100-3p>
+UCAACAAAAUCACUGAUGCU<miR-3065-5p>
+UGAGGUAGUAGGUUGUUUAGUU<let-7e>
+ACAGGACAGGACAGUGGGAG<miR-2441>
+CCUGAACUAGGGGUCUGGAGAC<miR-345-3p>
+AUUGGCACUCCGCUGAUUUGGUG<miR-791>
+CUGAAGCGUUUGGGGGAAGG<miR395>
+UACCACUGAAAUUAUUGUUCG<miR1313>
+GGAGAAAUUAUCCUUGCUGUGU<miR-539>
+AGGCAGACUGUGACUUGUUGU<miR-3529>
+UGCUACAUCAGCUAGAGCU<miR-4080-5p>
+CUUGGACUGAAGGGAGCUCCC<miR319d,miR319c,miR319e>
+ACCCGUGGGGCUCAGUUCUUGA<miR-146a*>
+AAAGUGCAACUUUGAUAAU<miR-4126-5p>
+UGGCAGUGUCUUAGCUGGUUGUU<miR-34a>
+GCCUGUUUCAUGCCCUGAGU<miR-S1-3p>
+AUCUCAGGUUUGUCAGCCCGCA<miR-1388-3p>
+UCUCGCUGGGGCCUCCA<miR-720>
+ACUUUGGUGAUUUUAGCUGUAUG<miR-9b>
+GGGUGGGGAUUUGUUGCAUUACU<miR-92a-1*>
+AAGCUGCCAGUUGAAGAACUGU<miR-22,miR-22-3p>
+UGGUCACAGCUGUUUGCAC<miR-4141-5p>
+AGAAGGAAGUUGAAUUCAUUUA<miR-1252>
+AGUUGGGAUUUUUUAGAUCAGCAG<miR-193>
+UGAGAGCGCAAAAAUAAAUUUG<miR-3010>
+GUGUGCGGAAAUGCUUCUGC<miR-147>
+UGGACGGAGAACUGAUAAGGGU<miR-184>
+UCCCUCACGUGGUGUUUGCAGC<miR1062>
+UAUUGCACAUCUCCCGGCCUAU<miR-310>
+GCUCAUUCUAGGACGUUUUA<miR-4000g-3p>
+AAAAGCUGGGUUGAGAGGGCGAA<miR-320>
+AUGCCUGACCACCGUCUACUU<miR-3483-3p>
+UCAUAUUGCUUCUUUCU<miR-1279>
+UAGAUACAUCCGUAUUUGGA<miR1122>
+AGCGAGGUUGCCCUUUGUAUAU<miR-381*>
+UUUGUGUGCCAUCGUGAACUUA<miR2622>
+AAGCCAAGGAUGACUUGCCGA<miR169c>
+AGCCCGGGCCCCUCCCCUG<miR-2882>
+UAAUACUGUCUGGUAAAACCGU<miR-429>
+UAAGGUGCAUUUAGUGCAGAUA<miR-18b>
+UGGACACUGGAGAGAGAGCUUUU<miR-3095-3p>
+GUGGGCUCAGAGCAGGCACA<miR-1669>
+GAUCAUGCUGUGCAGUUUCAUC<miR167e*>
+UUAUUUGUUACCCAUAUCUCC<miR774.2*>
+UAAAUGCACUAUCGGAUAUGAC<miR-277a>
+UGAUGAAUGCUGACGAUGUUG<miR419>
+UGGCAGUGUGGUUAGCUGGUUGUG<miR-34>
+GUGAGCAAAGUUUCAGGUGUGC<miR-87,miR-87a>
+UCGAAUCGUUUAUCAGGAUGAUG<miR-59>
+AAUGGCUUUCAUCCUUUGUGA<miR-135b>
+AGGGAUCGCGGGCGGGUGGCGGCCU<miR-638>
+CUGUACAACCUUCUAGCUUUCC<let-7c-1*>
+CCCGUCUUGUAUCAACUGAAU<miR168b*>
+GUGAGAUUCAAUUACUCCAACUAC<miR-755-3p>
+CUGACGUGCGAGGGAGUGCUC<miR-M30*>
+UAUUGCACAUUACUAAGUUGCA<miR-32>
+CUGGGAGGUGUGAUAUUGUGGU<miR-3689b*>
+UGGUUUCACAUGGUGGCUUAGA<miR-29b*>
+GGAGGUAGUUCGUUGUGUGGU<let-7>
+UGGGUGUACUUGCGGAUGAAUG<miR-1789>
+AGGUGCAGUGCUGCAUCUCUGGU<miR-143*>
+AAAAUUCAUUUUCAUUUGCAG<miR-1014>
+UUAAGGCACGCGGUGAAUGCCA<miR-124,miR-124a>
+ACUGGAAGCAUUUAAGUGAUAGU<miR-1828>
+GGAUAUCAUCGUAUACUGUAAGU<miR-144*>
+UCACUUCAGGAUGUACCACCCA<miR-547*>
+GUUCUCCCAACGUAAGCCCAGC<miR-629*>
+UUUGAGGUAGAACUGGAGGA<miR-4128-3p>
+UAACGGGAAGUGUGUAAGCACA<miR-BHRF1-3>
+UACAGUAUAGAUGAUGUACUAC<miR-144>
+UUCAAGUAAUCCAGGAUAGGCU<miR-26a,miR-26>
+UGGCAGUGUGGUUAGCUGGUAGU<miR-34>
+GCUCUCUUUCCUUCUGCCACC<miR156h*>
+UUCUAAUCCCGCCAUGCACCG<miR3443>
+UCAGAUGCUUUAAAUUCCCGA<miR3709a>
+CAAGGUGAAUAUAGCUGCCCAUCG<miR-BART5>
+CAUCGGAAUCUGUUACUGUUUC<miR947>
+UUAUUGCUUGAGAAUACGCGUA<miR-137>
+CAUGGAAGCAGGUACAGGUGCA<miR-51*>
+UAUUCAGAAAGGUGCCAGUCAC<miR-892b>
+CUGGGAACAGGCAGAGCAUGA<miR408-5p>
+UCAACAUGGUAUCAGAGCUGGAAG<miR1873>
+UGUCAUGGAGGCGCUCUCUUC<miR-47>
+UACUACUUUACAGGGAAUGCUCAGC<miR-3213>
+GUGCCUACUGAACUGAUAUCAGU<miR-189>
+UCCAUACACAAACCAUUGGAA<miR1316>
+UAAAUCCCACGGUGCCUUCUCCU<miR-605>
+UGUUGUACUUUUUUUUUUGUUC<miR-3613-5p>
+GGAGUCGUGUCUGGACAGC<miR-4148-5p>
+AAGCUCAGGAGGGAUAGCGCC<miR390,miR390a,miR390a-5p,miR390d,miR390b,miR390c>
+CCAGAGGUGGGGACUGAG<miR-4257>
+UAUUGCACUUGACCCAGCCUGC<miR-92b>
+UCUGAAAGAAUUGAUGCUCUUC<miR-1326>
+UAGGCUGCUAAUGCAAGCCC<miR-4013a-3p>
+AUCCCUGAGUGUAUGUGGUGAA<miR-670>
+CUAUACCAGGAUGUCAGCAUAGUU<miR-1949>
+UAGCUUUGGUGGAUGGUCUUU<miR-3101*>
+AGACUUUUCAGGUAGUUCAC<miR-1502b-3p>
+CUCCUACAUAUUAGCAUUAACA<miR-155*>
+UCAGUCUUUUUCUCUCUCCUA<miR-14>
+CCGUGCUUGCCUAGCGAACUC<miR-H4-3p>
+CUGGGGGCUGCCAGGCAGGAGGC<miR-2454>
+UGAGCCAAGGAUGGCUUGCCG<miR169b,miR169h>
+GGUAUCCGUUUGGGGAUGGU<miR-3713>
+CGUUCAGUCAUUCUAUGCAU<miR-4043-5p>
+CUGCGUCUGGGGAGGGGGCCA<miR-2328*>
+AAAAACCACAAUUACUUUUGCACCA<miR-548aa>
+GCGACCCAUACUUGGUUUCAG<miR-551b,miR-551>
+AAUGACACAGAAGAACUGGCAAUG<miR-2226>
+AACACCUUAAUCACCAAUGUG<miR-4063-5p>
+CAUAUACAUACACACACACGUAU<miR-669f-3p>
+UAAGGCACGCGGUGAAUGCUAA<miR-124a>
+AGGCUGGGAAUAUUUCAGAGAU<miR-3083>
+UCAUACGUAUUUGUGUACUGCGUUU<miR-3363>
+AGAGAUGAUGUUGGUCUGAUG<miR-1721>
+CUCUCCCUCAAGGGCUUCUCU<miR477b>
+AGGGCUUAGCUGGCCUGUGAACA<miR-27a*>
+UUGAAAUUGUAGAUUUCGUAC<miR4243>
+UAAGUGCUUCCAUGUUUUAGU<miR-302d,miR-302>
+CUUCCAUUUAUGAUAAGUAU<miR2095-3p>
+UUGGGGACGAGAUGUUUUGUUG<miR447b,miR447a>
+CGAGCCGAAGGGGUGGGCGCUGC<miR-1581>
+UUAAAUGAAUGAACCUAGAAU<miR2593b,miR2593c,miR2593a>
+GAGUGGUUGGUUUGUAUGAGAUGGUU<miR-1244>
+UUGAGCCGCGCCAAUAUCACU<miR171f>
+AAUUGUUCAUUCAAGGAUAUU<miR773b*>
+UGAGGAAUCCUGAUCUCUCGCC<miR-3063>
+CGGGGCCGUAGCACUGUCUGA<miR-128-1*>
+UUGAAGAAUUGCAGGUGGUGGUC<miR-1497c>
+GGACUUUCUGUUGGACGCAUAU<miR3458*>
+ACUGUACAGGCCACUGCCUUGC<let-7g*>
+UGUAACAGCAACUCCAUGUGG<miR-194a,miR-194>
+UGACUAGAUUUCAUGCUCGUCU<miR-996>
+CACACACUGCAAUUACUUUUGC<miR-603>
+CAUCUUCCAGUGCAGUGUUGGA<miR-141*>
+CACCAGGCAUUGUGGUCUCC<miR-1911*>
+UACUGCAUCAGGAACUGAUUGGAU<miR-217>
+CUCUAAGGGCUGGGCCGGUCGG<miR-2487>
+CUCGAGUGAGGUAGAGUCGU<miR-2816>
+CAAAGCCUAGACUGCAGCUACCU<miR-3078>
+AGCUGCCAAAUGAAGGGCUGUG<miR-745b>
+CUUAUCAGAUUGUAUUGUAAUU<miR-374a*>
+GCCUCUGGUGGUCGGUUUGU<miR-2290>
+ACGGCUACCUUCACUGCCACCC<miR-34*>
+AAAGGUGUUAAAUGAAGACUUAG<miR-2780d>
+UUCAGCUCCUAUAUGAUGCCUUU<miR-337>
+AUUGGUUAAGAUAUUGCAUCGU<miR-2768>
+GUUCCCUUUAACGCUUCAUUG<miR395b*,miR395c*>
+AUCCGUGUUGUCUGCGCUUUA<miR2918>
+UCACAACCUCCAUGAACGAGGGU<miR-67-3p>
+CAAUGUUCCCACAGUGCAUU<miR-33b-3p>
+GGGAUGAAAUGGGCUUUACCAU<miR-H11>
+CAGAUCAGAAGGUGAUUGUGGC<miR-383>
+AUGAAGUGCACUCAUGAUAUGU<miR-3616-5p>
+UGGGGUGUGUGCUGGAGCCUGCU<miR-2438>
+GGUCAUGCUCUGACAGCCUCACU<miR167b*>
+AGCAGCGUCGGGCUCGACCGC<miR910>
+ACCAUUAGCCUAAUGUAUCGUGU<miR-190b*>
+AGUUUUGUGUGCAUGUGCAUGU<miR-669b>
+UGACAACGAGAGAGAGCACGC<miR535a,miR535c,miR535d,miR535,miR535b>
+ACAGCGGGAACAGACAGGCAG<miR-214>
+UAUUGCACAUUCACCGGCCUGA<miR-311a,miR-311>
+UUAGUGGAUUCGCCUGUUGACACCGGC<miR-3054>
+UUGAGUUCUGCAAGCCGUCGA<miR3953>
+AACUGAGAUACAUCGCAAUCG<miR899>
+AGAGUAUUCCAGGUUGCAUAGCUU<miR-960>
+UUGGUGUAAUUAUGAUGUCUUCG<miR-2711>
+AUCCGUGAUCGCUUUGCCCGGC<miR-4183-3p>
+UUAUUGCUUAAGAAUACGCGU<miR-137>
+UGUGUUGAAAGUUUAACAUGACGG<miR4341>
+UAGAUGAAGAGAGUAAUGA<miR-4138-5p>
+CAAGGGAAAGUACCAGCUUUG<miR-4005a-3p>
+CCUGCUGUAAGCUGUGUCCUC<miR-683>
+UCUUUGGUUAUCUAGCUGUAU<miR-9>
+UGGCCCAUGCACAGUAUCUACG<miR1221-3p>
+GGAGUGUCAUGAGAACACGGA<miR398a*>
+UGUGACUGGUUGACCAGAGGGG<miR-134>
+UUUGGGACUGAUCUUGAUGUCU<miR-3913>
+AAGAUAGAUAGAAAGGUCGAAU<miR-3214>
+CAAAUUCGUAUCUAGGGGAAU<miR-10a*>
+UAUCCUGGCCUGCAAGUGCACUC<miR-2689>
+GGCAUUCUCUCGAAACAAGUG<miR1101-5p>
+CUCAUUAAAUGUUUGUUGAAU<miR-421*>
+GCCCUUUUUAUGUUGUACUAC<miR-130b*>
+AUGGAUAAGGCUUUGGCUU<miR-1261>
+UGGAACUUAUACGAACAGGC<miR-4001a-5p>
+GGAGGCAGCGGUUCAUCGAUC<miR162a*,miR162b*>
+UUAGUAGAGUGGAAUGCC<miR-4167-5p>
+CGGCUGGAGGUGUGAGGA<miR-3652>
+UGACAGAAGAGAGGGAGCAC<miR156a,miR156k>
+CAGCUGCCCGGUGAAGUGUAUA<miR-22>
+GUAAGUGACCCAGUUGAGCG<miR-2579>
+GGCAGGCCUUCUGGCUAAG<miR169q*>
+UCAUAAGACACACGCGGCUAU<miR-970>
+GUGAAUUGUUUGGGGGAACUC<miR395f>
+UACCAAAAGUAAUAAUGUGCUG<miR-3567>
+UUUCCAUGGCAGACUUUCUAGGCU<miR-1626*>
+AAGGAACCAGAAAAUGAGAAGU<miR-3914>
+CUGGGACAGGAGGAGGAGGCAG<miR-4298>
+GAGGAAAGUAUCGCCUUCUAGA<miR-rL1-28>
+CUGGACUGAGCCGUGCUACUGG<miR-1269>
+UUGAACUUCUCAGGAACAGGCUAG<miR-1482>
+ACUCAAACUGUGGGGGCACU<miR-371-5p>
+UCACCGGGUGGAAACUAGCAGU<miR-35>
+CGCGUGAUGUAGAGGGUGACG<miR-B4>
+AAGUAGUUGGUUUGUAUGAGAUGGUU<miR-1244>
+AUAAAGCUAGGUUACCAAAGGC<miR-79>
+GUAAUAUACUAAUCCGUGCAU<miR1429-5p>
+CUUGGGGUGAAGGGAGCUCCU<miR159e>
+UCACCGGGUUAACAUCUACAGA<miR-42>
+GACAGAAGACUGCCGCUCAUUU<miR-3494>
+UCGUCCAUAUGGGAAGACUUGUC<miR1531>
+UUAUAGAUAAUACAAGCAUAU<miR-3046>
+CCAGCCCGUUUUCCAGAGGUCU<miR-1353>
+AGGGCCAUCGCCUAUAUCUGCCCA<miR-1483-3p>
+AUGCCUUUUGCUCUGCACUCA<miR-511-5p>
+UUCAUCAGGCCAUAGCUGUCCA<miR-77>
+ACUAUACAACCUCCUACCUCA<miR-3596c>
+UGAGAACUGAAUUCCAUGGACU<miR-146a*,miR-146b>
+ACUUGACUGCAGGCACUGCUGCU<miR-1731>
+UGACUAGAGGCAGACUCGUUUA<miR-2945>
+GGAGGGAGGAAAAAAAAAAA<miR-1599>
+GGAUGAGCAAAGAAAGUGGUU<miR-1255b>
+UGCAAACUUGAUCAGGUUUU<miR-4178a-5p>
+AGAUAUGUUUGGUUAAUUGGUGA<miR-190a-5p>
+AUGUACUUACUUUGUUUGUUCU<miR-3338>
+UAUCAGAGUCUUGGGUCCUUGU<miR-1547>
+GUACGUACGUCAUAAUAAAA<miR-4021-5p>
+GUUACCCUGUUAAUCGAAGAAGU<miR-1991>
+CUUUCUGUAGCUGUUGGAACUA<miR-2399>
+UAGGGCUACUACACCAUCCAUAAG<miR1874-5p>
+UGCAUUUGCACCUGCACCUUG<miR530a>
+CUCCUGAGCCAUUCUGAGCCUC<miR-1200>
+UCCCUCAAAGGCUUCCAACAA<miR477g-5p,miR477f>
+UGAUUGAGCCGCGCCAAUAUC<miR171d,miR171j,miR171e,miR171g,miR171,miR171f,miR171n,miR171a>
+CCUCAGAUCAGAGCCUUGC<miR-4330>
+UUAGGCCGCAGAUCUGGGUGA<miR-1295>
+CGGGGACACACUUUCUCCU<miR-3062*>
+AGUAGACUCGUCCGAUUUUGCGUA<miR4370>
+CUUCCCGUGUGUUGAGCC<miR-2883>
+CAAAACAUUCAAAACUCCCUAC<miR-3047>
+AUGGCCAAAACUGCAGUUAUUUU<miR-548s>
+UGCCCACCCUUUACCCCACUCCA<miR-702-3p>
+UGUAGUGUUUCCUACUUUAUGGA<miR-142a-3p,miR-142,miR-142-3p>
+GGAGAAUGUAGUGUUACCGUGA<miR-3062>
+UGGGUAAACUCCCAAGGAUCA<miR-1001>
+GGCAAGAUGUUGGCAUAGCUG<miR-31>
+AGGCCUGGCGAAGUGCAUUG<miR-92c*>
+CCCUUGGGUCUGAUGGGGUAG<miR-3189>
+AAUGCACCUGGGCAAGGAUUCA<miR-502-3p,miR-501-3p,miR-502,miR-502a>
+AAGCGGCUGCCUCUGAGGC<miR-646>
+UUGUGAAGAAAGAAAUUCUUA<miR-3611>
+UAGGUAGUUUGAUGUUGUUGGG<miR-196c>
+UGCAUAUACACACAUGCAUAC<miR-669i>
+UUUGAACCAUCACUCGACUCCU<miR-434-3p,miR-434>
+UCUUUUCAAAAUAGUCAGGUGGAU<miR-3279>
+ACUGGACUUGGAGUCAGAAGAGUGG<miR-378c>
+UGGGAGUGGAGCGGAGCUGUC<miR-1648*>
+CAUCUGCAGUGUGACCACAUGA<miR-1414*>
+UUUGUUGGUUUUCGUAGC<miR-4154-3p>
+CAAGUGCUCAGAUGUCUGUGGU<miR-105>
+UAUCUAGUUGGAUGUCAAGACA<miR-878-5p>
+UGGUGGUUUACAAAGUAAUUCA<miR-876-3p,miR-876>
+AAAGUGCUUACAGUGCAGGUAG<miR-106a>
+CGUCAUGGAUCGCGGGGGGACG<miR-H3-5p>
+AUACUAGACUGUGAGCUCCUCGA<miR-3586-3p>
+AGAGAUCAGCGGUUACACUACA<miR-2209a>
+AGCUCUGAUACCAUGUUAGAUUAG<miR1863>
+AGAGGUAGGUGCGAGAAAUG<miR-241>
+GAGUUCCACUAAGCAAGUUUU<miR-969*,miR-969>
+CUGCCAAUUCCAUAGGUCACAG<miR-192*>
+CCAGGGCACGGAUCCAUGAACU<miR-2425>
+UCCGGCGCCGCACUAGGCACUG<miR1437>
+UGGAAGGCCUGGCUUUGCAGCG<miR-2387>
+UCAUCGUGCAUGGGAACGGUCAUCU<miR-3234>
+AGAUGGAGGCACUGAAAAUUU<miR-2417>
+AUAUUACAAUUAGCUCAUCUUU<miR-556-3p>
+ACACCUUUAGCCGUGUCAGAC<miR-66*>
+CAUGUCAGUAGAGGCGCGUGUG<miR-2450c>
+AAGGUCCAACCUCACAUGUCCU<miR-2188>
+GCAUACAAUAAUUUAUGACAGAU<miR-3329>
+CAAUAUAAAGUUGACCUGA<miR-4097-5p>
+AUGGAAUGUAUAUACGGAAUA<miR-3673>
+UAGAAACUUGGCUGAUGCAUUACU<miR1863c>
+CGGGAGAAGCUAUAGCGCUAUAUG<miR-965>
+UACGCACGCACACACACAC<miR-466h-3p>
+GGUGUAGCUCCGAUGGUAG<miR-4175-3p>
+AAGCAUUCUUUCAUUGGUUGG<miR-1179>
+AUGACCUACGAAUUGAUAGACA<miR-215>
+UCUGCACAGACCCUGGCUUUUC<miR-1284>
+AGCGGGCACAGCUGUGAGAGCC<miR-666-5p>
+AAAAGUGCUUACAGUGCAGGU<miR-106>
+UUUGGAUUGAAGGGAGCUCUG<miR159a,miR159b,miR159d,miR159j,miR159,miR159a.1,miR159f,miR159k>
+UCACAACCUUUGACGAAUGAG<miR-2168-3p>
+UUUUUUGCAAGUUACCACA<miR-4001b-1-3p>
+UAAGAUAAUGCCAUGAAUUCG<miR1428d,miR1428c,miR1428b>
+UUCCACAGCUUUCUUGAACUG<miR396,miR396c,miR396a,miR396b,miR396d>
+CGGAGGAUUAGGUAAAACAAC<miR1510a>
+AUUGCACUUGUCCCGGCCU<miR-92>
+UGACUAGAUUACAUGCUCGUC<miR-996>
+AGCUACAUUGCCAGCUC<miR-1928>
+UAAGGCACUCGGUGAAUGCUAA<miR-124b>
+UUCCCAACUACAUCUAUUAAUAU<miR-991*>
+GGAUCAAGCUGAUCCGGAAGUGGA<miR4369>
+AGGAUUUCAGAAAUACUGGUGU<miR-3167>
+UGGCGCUAGAAGGAGGGCCU<miR3711>
+UCGGUCGAUCGGUCGGUCGGU<miR-341>
+GGCCGCCCUCUCUGGUCCUUCA<miR-1900>
+CCAUACUUCUUUACAUUCCAUA<miR-1-as*>
+GCAUUAACCCUGUUGUCUUAGAU<miR-124c-2*>
+UCUAUACAGACCCUGGCUUUUC<miR-1284>
+UUCGUGCCAAGCUGUGUGCAAC<miR536d,miR536a,miR536b,miR536e>
+AGUGUUUCCUACUUUAUGGAUG<miR-142*>
+UGUGUAUCGUGGUCGUCUACUGU<miR-M5>
+UCGCAACCCAUACUCCGACGG<miR3464*>
+CUACUUAGUAGAGAUUUGUUGG<miR4366>
+UCACUCGUCGCGAGCGGUCAC<miR-m108-2-5p.2>
+AAGAGAGCUGUCCGUCGACAGU<miR-281*,miR-281-1*>
+AUUUGGGGACGGGAGGGAGGAU<miR-1892>
+CCACAACACUGCCUGGUCAGA<miR-383*>
+GGGAGUCUACAGCAGGG<miR-4294>
+GUGAAAUCCGGGUGAAGGCUGU<miR-1753>
+CAAUGCAAAAAGGCCAUUUG<miR-4132-5p>
+CUCCUGGCUGGCUCGCCA<miR-1386>
+UGAAGCUGCCAGCAUGAUCUGG<miR167d,miR167c>
+UCCUGUAGCCAGAAGAUUCUGA<miR-1775>
+GAUCAUGUUCGCAGUUUCACC<miR167a*>
+AGCUGUCCGAAAAUGUCUU<miR-626>
+UAGAUCUCUAAUAAGCAAAGGU<miR-2508>
+AGAAGAAGGCGGUCGGUCUGCGG<miR-3185>
+AUUGGGAUUCAGUUGGAGUUGG<miR4351>
+UUUCCUAUGCAUAUACCUCUUU<miR-202*>
+CAUCAGAAUUCAUGGAGGCUAG<miR-2115*>
+AUAUUACAAUUAGCUGAUCUUU<miR-556-3p>
+AUCAUAGAGGAAAAUCCAUGU<miR-376b>
+CGUUUUGUUUGCCAUUCAGC<miR-4119-5p>
+UAAACACUUCCUACAUCCUGUAU<miR-975>
+UUGAUCAGAAAUGCAGCUUC<miR-277b-5p>
+UUAUUGCUUGAGAAUACA<miR-137>
+AUUGGAGUGAAGGGAGCUCCG<miR159c>
+UUGUGCGUGUUCCAAUAGUUAU<miR-3286>
+UAAGGUGCAUCUAGUGCAGUUAG<miR-18,miR-18b>
+UUGCGUAGGCCUUCGAUUGGCG<miR-242>
+ACUCCGGCCUGGACUGCGGCGGG<miR-2316>
+AUUGGUUUCUAGAUCUCAGCA<miR-3036>
+UGCAUCGCGUGUGACCUCCCUAC<miR-1421aa*,miR-1421z*>
+UACUGGCCCCCAAAUCUUCGCU<miR-240>
+AGACUACAAACUACAUCAUUUUC<miR-2218b>
+UUGCACAUUACCAAUAUUCUGA<miR-2024e>
+AGAUUGUUUAGUUUUGUUUG<miR-1814b>
+UCGCUUACGCCGACCGCGUAAC<miR-rL1-31-5p>
+CAUGUUUGAAUGGCCAUGACA<miR-751>
+AGAGAUGAGCGGUUGUGCUUCA<miR-2209b>
+CAAGUCACUAGUGGUUCCGUUU<miR-224>
+UAUGGCUUUCUUUUCCUGUGUG<miR-135-5p>
+CGGGGUCGUCGCCGUCCCUUC<miR-1456*>
+UGAGAUUCAACUCCUCCUACU<miR-1175*>
+CACGUUACAAUAUAUGGGUCG<miR-52*>
+GGUAGUCGCUGUGAAAUUGAA<miR3626>
+UAUCACAGCCGUGCUUAAGGGC<miR-2c-3p>
+UAGGAAAGUGGAAGCAGUAAGU<miR-1958>
+CUGGUACAGGCCUGGGGGAUAG<miR-150*>
+AAAAGUUCGUUUGGUUUUUUC<miR-2284b>
+GCGGCAGCGCCAGCAACAGCU<miR-2502>
+UUCUCCCCUCAAUCUCAGGACU<miR-2394>
+AGUCCAAUAGGGAGGGCAUUGCAG<miR-2005>
+AAAGUGCAACUGUGUAAACC<miR-4029-5p>
+GCUUUGGUAAUCUAGCUUUAUGA<miR-9b>
+UCUGAAUGAUGUCGACUGAUG<miR-2303>
+CAUGCCACCCUUUUCCCCAG<miR-1227>
+CUCAGCGGCAGUGCUAUUCCAG<miR-986*>
+UGUAUUGGAACACUACAGCU<miR-1805>
+AUCGAAAAGGCAUCAUCAAUCAGG<miR3640>
+UAUACAUACACACACAUAUAU<miR-467g>
+UCACAGCCAGUAUUGAUGAACG<miR-2a-3p>
+UGACUAGAUCCAUACUCAGCU<miR-279>
+UGAGGAAAUGAGCCAGCUGAG<miR-1687>
+UUCCUGGAGUGAGCUGAAGGUU<miR-2959>
+UUACAUGUUUCGGGUAGGAGC<miR-246>
+UAAACACUGCCUACAUCCUGUAU<miR-975>
+AGGUUGUCCGUGUUGUCUUCUC<miR-494*>
+GCUAGGCAGUGCACAGCGAUA<miR898a*>
+GGAUUGAGCCGCGCCAAUACU<miR171j>
+CAAUCUCAGCCUGUUAAUAGGAGUU<miR-216-5p>
+UAGAUACAUCCGUAUCUAGA<miR1122>
+GGUAGAUUAUUGUCUCAGAGUAA<miR-125b*>
+UGGGUAGUGUGUCUUUUCGGA<miR-2020>
+UUUUGCACCUUUUGGAGUGAA<miR-507>
+UGAUAUGUCAUCAUCUUCCUUU<miR-2234a>
+GCUACGGCCCGCGUCGGGACCUC<miR-738>
+UACCCUCAAAAGACGGUAUUAG<miR-2043a>
+GACAUCAUUAUUUGACUGUCGAU<miR-2d-5p>
+UAGCAGCACAUCAUGGUUUGU<miR-15c>
+GGAACUAGCAGGAGCAUUAAG<miR-2028*>
+UGCAAGCAAUGUGGAAGUGA<miR-932>
+GCGGUGAUGCCGAUGGUGCGAGC<miR-598*>
+UGAGGUAGUAGUUUGUGCUGU<let-7i>
+UCCUGGCCCUGGUCCUGGUC<miR-3113*>
+UACAUUUUCUUCUUUAUGUCU<miR2595>
+UCAGGAGAGAUGACACCGAC<miR1318>
+UCUUUCCUACUCCUCCCAUUCC<miR482c,miR482>
+UUGUGCGUGUGACAUCGGCUA<miR-210>
+UGCAGGACCAAGAUGAGCCCU<miR-1286>
+UGAGAUCGUGUAAAACCAGGAG<miR-2250>
+AUCACACAAAGGCAACUUUUGU<miR-377>
+UAUGCAACGGCAGAUAGGAGCA<miR-2543a>
+UCUGCAUCUGCACCUGCACCA<miR1030f,miR1030c,miR1030a,miR1030d,miR1030e,miR1030g,miR1030b>
+UCUUUGUUAUGUCAGCUGU<miR-4164-3p>
+UGCACCCAGGGAUAGGAUAGCG<miR-1544>
+ACAAGCUAGCAACCCGGCUCCGUG<miR-3319>
+AGAUAGCAUGUGCCGUCCUCUUU<mir-M1-4*>
+CGGUGAAAUAUUUUGACCAAUU<miR-2768*>
+AUUGCUUCCCAGACGGUGAAGA<miR-686>
+UUUCUUAUGGACCGCCGAGGUGUGUC<miR-H12-5p>
+AAGGGAGACGUUUGAAUUAUC<miR3520-3p>
+GUGUUUGUCGAUGAAUUAUUGGUACUCA<miR-3268*>
+AUAAAGCUAGAUAACCGAAAGU<miR-9*>
+GUGAAGUGUUUGGGGGAACUC<miR395l,miR395f,miR395r,miR395a,miR395j,miR395i,miR395k,miR395q,miR395h,miR395d,miR395c,miR395m,miR395p,miR395b,miR395s,miR395g,miR395n,miR395e>
+GUGAGGACUGUUGAGUGGCCAAA<miR-1671>
+AGCAAGGUCCUCCUCACAGUAG<miR-679-3p>
+AACUAAAUGUCAAACAUUCU<miR-190b*>
+UGACAGAAGAGAGUGAGCAC<miR156e,miR156j,miR156c,miR156g,miR156d,miR156b,miR156h,miR156i,miR156f,miR156a,miR156l,miR156>
+UAAUUUGGUGUUUCUUCGAUC<miR870>
+UGAGGUAGAAUGUUGGAUGACU<let-7a>
+UACAGUACUGUGAUAACUGAAG<miR-101a,miR-101>
+UAUGACACUGAAGCGAGUUAG<miR-63*>
+GUUUUUUUGCAUAUCCUGCA<miR-2778b*,miR-2778c,miR-2778d,miR-2778a*>
+AAGUCAUCAACAAAAAAGUUGAAU<miR821b,miR821a,miR821c>
+ACUCUCCCUCAAGGCUUCCA<miR473a>
+GAGUCUGAGAUUGAGGAAGGCA<miR-2292>
+UGAAUAUGUUUGUACAAGCUUU<miR2099-5p>
+UUUUCACAUAAAUUAAAAUAU<miR1530>
+UCGCACAGGAGCAAAUUACCGCG<miR-1451>
+UAGCAGCACGUAAAUACUGGAG<miR-16c>
+UGGUGGGCACAGAAUCCGGCCU<miR-541>
+UAAUCUCAGCUGGCAACUGUGA<miR-216,miR-216a>
+CAAAAGUGAUCGUGGUUUUUG<miR-548t>
+UUUAUAGAAUAUGUAUGUAA<miR-4210-5p>
+UUACAAAGUCAUGGUCUAGUAGU<miR-BART22>
+UAUCGACAAGAUCUCUCAGUGG<miR-4065-3p>
+CAGGUCACGUCUCUGCAGUU<miR-370*>
+AGUGCCGCAAAGUUUGCAGUGU<miR-293*>
+UGCAAUAUAGCUAUUUUGUG<miR-4096-3p>
+AAGUUGGAAUUUGAUUGACU<miR-4077b-5p>
+UGUCAGGACUGAGGUUGUGCUU<miR-1474>
+CCUUCCAGAGGUUUCUUCUGAG<miR-2996>
+UAUUCAUUUGCCUCCCGGCCUA<miR-664b>
+AAGUGCUACUACUUUUGGGUGU<miR-295*>
+AGUUAAUGAAUCCUGGAAAGU<miR-569>
+CAUCUUACUAGACAGUGCUGGA<miR-200a*>
+UCUUUGGUGAUUUUAGCUGUAUG<miR-9b>
+UAUCACAGUGGAUUUGGUUUAU<miR-2f>
+UCCUUGGUCACCGGUCAGUCCGG<miR-3211>
+GCUGGGCUGAGAGAAGCCGGA<miR-1349>
+AUUGACACUUCUGUGAGUAGA<miR-514>
+AUUUGGGGUGGGGGAUGGGGA<miR-1892>
+UUGGACUGAAGGGAGCUCC<miR319>
+CAGAGUACGCAAAAAAUCAAUU<miR-2778c*>
+AUAAGACGAGCAAAAAGC<miR-208>
+UGUUGUUUUACCUAUUCCACC<miR1510b,miR1510a>
+AGUGUGACACUGGUGUUUUU<miR-122b>
+AUUCUGUAUGGAGUUGAACU<miR-4082-3p>
+UUGCACUGCAUGGUAUCUGC<miR-2404>
+UGAGGUAGUAAGUUGUGUUGUU<let-7h>
+UAAAAGCCGUCCAAGCACC<miR-2037*>
+UGACUAAGCCCCUGCUCACCCA<miR-3210>
+UGGACUUCCUUCUCGUUCCCAGC<miR-74b*>
+GAUUGCACUCAAUAUGGUCAGAU<miR-2151>
+ACAGGGCCGCAGAUGGAGACU<miR-3918>
+ACUCGGUCCGGAGUCAAUGGG<miR-2214>
+AUAUUGGCAGUCUUCGGCCUGA<miR-2506>
+AGAGAUCAACCAUUGAGAUCCAA<miR-1834>
+UGAGAACUGAAUUCCAUAGGCG<miR-146b>
+CCAGGAAAACAUCUUCAGACA<miR3448*>
+UGCCUGGCUCCCUGAAUGCCA<miR160c,miR160f,miR160-5p,miR160e>
+UGACUAGGGUAGUAUGAGUAGA<miR-3580-3p>
+UCAGGUACUGAGUGACUCUCAG<miR-306>
+UAAAUGCGAGCAGUAGUAGGCG<miR-rL1-32-3p>
+UUCCCGAUGCCUCCCAUUCCUA<miR2118n,miR2118b>
+AUAAGGUAGAGAAAUUGAUGCUGUC<miR-962>
+CUGUAAUAUAAAUUUAAUUUAUU<miR-2054>
+CUCACAGUCUGUACAGCUCUC<miR533b-3p>
+GUGUGCGGAGAUGCUUCCG<miR-147>
+AAAAGUUCGUUCGGUUUUUCU<miR-2284u>
+GCGACCCACUCUUGGUUUCCA<miR-551a>
+CAAAUGCACGCAAAUGAAGAUGA<miR-2049>
+UGAAUUCGAAAAGGCCAAAC<miR-4199-3p>
+AGAUAGAAAGCAAUCUGGAUA<miR3449*>
+ACCGCUUCCUUCCUUGCGCAC<miR-2225*>
+AGUGGCGAACACAGAAUCCAUAC<miR-541*>
+CAACGGAAUCCCAAAAGCAGCUG<miR-191>
+GGUGAGGCUAGCUGGUG<miR-4316>
+UAAAUGCAUCUACACUUCGGUGG<miR-232>
+UGGGAAAGUUCUCAGGCUUCUG<miR-1953>
+UAGCAGCGCAUCAUGGUUUGUA<miR-15b>
+UGAGGUAGUGGGUUGUAUCGCU<let-7d>
+CCGGCUGCGCCCGGAGGA<miR-1845>
+UGAUAUGUCUGGUAUUCUUGGGUU<miR-50>
+UAGUACGGAAAAGAUAUGGGGA<miR-2946>
+UCUUUCUGCUCCGUCCCCCAG<miR-1237>
+UAGGUCACCCGUUUUACUAUC<miR-1193-3p>
+UUUGUUGAUUGACAUCUAUAC<miR827*>
+UGCAAAUCUUUUGCAACUGUAUA<miR-254>
+UGAUAUGUUUGAUAUUCGGUUG<miR-190b>
+UAGCCGUUAGCGCUCAUUAACU<miR397a*>
+UACGUCAUCGUUGUCAUCGUCA<miR-598>
+AGAUCUUUGGUAAUCUGAUGGCU<miR-2424>
+AUGGGGGCCUCGGUCAAGCGG<miR-M23-2>
+UCAAGCUCGGGUUUAUGGGUGU<miR-1473>
+AGAGGUAGUAGGUUGCAUAGU<let-7d>
+CUGGCCCUCUCUGCCCUA<miR-328b-3p>
+CUCUCUCCGCAGACCUCAGCCG<miR-1584*>
+UGUCAGUUUGUCAAAUACCCCA<miR-223>
+UAAGGCACGCGGUGAAUGC<miR-124>
+GUGAAUUACCGAAGGGCCAUAA<miR-183*>
+UGGCUUGGUUUAUGUACACCG<miR778>
+ACCUGGUCCCGCUAUUUGAAUC<miR1157*>
+UUGCAGCUGCCUGGGAGUGACUUC<miR-1301>
+CCGGGCCGGGCGGGCGGG<miR-2981>
+GUGCUCCCUUCACACCAAUAA<miR159i*,miR159g*,miR159h*>
+UUCACAAAGCCCAUACACUUUCAC<miR-350>
+UGAGCCACAGUAGAGCCUUGGAU<miR-2465>
+GCUCACUUCUCUUUCUGUCAGC<miR156g*,miR156f*,miR156d*>
+UGCUUCCUGUUGGGCUUCCUGC<miR-1375>
+ACCUAGUGUUAGUGUUGUGCU<miR-BART3*>
+UUUUUCUCUAUAGACUAUCUCCAG<miR2125>
+UCCUUAAGUUUUUUGAACGCAGUG<miR-3414>
+UUAAUCUAGGAAAAUACGGUG<miR1509>
+UGCGAGUGUCUUCGCCUCUG<miR2109>
+UUGGUCUGGCACAGAGCAUGUGAG<miR-2357>
+UGAGCGAUUACUGGAGUUCA<miR-3491>
+AACUUGACACGUUGAGCUCGU<miR-969>
+CUGAAGUGUUUGGGGGGACUC<miR395f,miR395h,miR395c,miR395b>
+CAAGGUGGCCUAGCAGAGUGUU<miR-2755*>
+CAGUCGUGUGAUUGUACGGUUCAU<miR4357>
+UGAGUUGGUUAUUCAAUCUUGCG<miR-4003b-5p>
+UACCAAAACGUCGAUGGUACCAGCAG<miR-2736>
+AAUCACUAACCACACGGCCAGG<miR-34c,miR-34c-3p>
+UCGUGCCAGGAGUGCGUUUGC<miR-277*>
+UCAGGCUGUGUGGGAUCCGG<miR948>
+UGCAUUGUGUUAUUUGAAGCUUGA<miR1072>
+AUAAAGCUAGGUUACCGAAGUUA<miR-9a*>
+UGCAGCAACAGCCAUUGGUCAU<miR-1405>
+UGGGCCCAGGGCUGUGCUGGAGA<miR-1604>
+AGAGCAGAGCAUUCUUCGUCA<miR-2522b*>
+UCUGGCCUGGCUGAUGAUCUCA<miR-2439*>
+UUGUCUGUGGUUCGAGGGUG<miR-2856*>
+GAACCCAUGAGGUUGAGGCUGCAGU<miR-1273d>
+UGACAGAAGAUAGAGAGCAC<miR157d,miR156b,miR156a>
+ACGUUGGCUCUGGUGGUGAUG<miR-1306-3p,miR-1306>
+AGCUACAUUGUCUGCUGGGUUU<miR-221>
+UAUCGGAAUCUGUUACUGUUUC<miR947>
+UAGAAAUGGCCGUACUUCCUUU<miR-M1-1>
+GAAGGCUGUGUGCUGUGGAG<miR-449d>
+AGUCAUUGGAGGGUUUGAGCAG<miR-616>
+AAGGUAAAGCUGGCUACAUAACGU<miR-1485>
+UAGCAGCGGGAACAGUACUG<miR-503>
+AUUCUGCAUUUCUAACAAGUUC<miR-544b>
+UCGACCCUUGUGCCUGUUUCGGU<miR-2217>
+AGUCAGGCUCCUGGCUAAAGUUC<miR-344b*>
+GUGCCUUGUGAGAUUAGAGUU<miR3443*>
+UGUGUGUGUGUGUGUGUGUG<miR-466i-5p>
+GGUCGUGGGCUUGUGUCGCUUG<miR-M95-1-5p>
+AACGCCAUCAUCACACUAA<miR-122*>
+UGAGAUCCAACUGUAAGGCAUU<miR-3471>
+CCAUAGCACAGAAGCACUCCCA<miR-3060>
+UCCCUGAGAAUGCUCCGACAUCU<miR-237>
+UUCCUUGCCGGAGCUGGACUAC<miR2640a,miR2640b>
+UUUAAAUCAUAUACUUUUGGU<miR407>
+AGGCAAGAUGCUGGCAUAGCUG<miR-31>
+UGAAAGACAAGGGUAGUGAGAUG<miR-71>
+UCGCCGAGAGGGACAUUGAU<miR1150.2>
+UGAUUGAGUCGUGCCAAUAUC<miR171>
+AGCUGGUAAAAUGGAACCAAAU<miR-133a-5p,miR-133a*>
+UUCUGGAAUUCUGUGUGAGGG<miR-1299>
+AUGGCUCUGGAUUACACCUU<miR-1741>
+CGCCGGGGUAUGACGUCGU<miR-4053-5p>
+UCAGUAACAAAGAUUCAUCCUU<miR-802>
+AUAAUACAACCUGCUAAGUG<miR-374c>
+UGCCUUUUCUUUGAGUAGC<miR-2159-5p>
+CAGCCUCGCUGGCAGGCAGCU<miR-681>
+CCUAGGGACUCAGUUCUGGUG<miR-146b*>
+ACUGUAUGUGAAAAAAUAUG<miR-4124-5p>
+AGGCAAGAUGUUGGCAUAGCU<miR-31>
+ACACUGAAGGACCUAAACUAAC<miR840>
+AUCAGCCUCGCUGUCAAUACGG<miR-2008>
+GUAAGUCACUGAUUUCUUUAGU<miR-2549*>
+AAACAAUUAUCAGAAGAUUUC<miR-4084-3p>
+UGUGCAAAUCCAUGCAAAACUCG<miR-19c>
+CAGGAGCUUGGACAUGUU<miR-2997>
+UUACGUUGUGGAUGUCUAUGGGC<miR-3351>
+UCUCAGAGGGACUGCGACAUCU<miR-1837>
+UCUGGUUGGAUUGUAGGCCUC<miR1024a,miR1024b>
+AGCCUUGCGUGUGCUCUUAUUGGUA<miR-970*>
+UAGGUAGUUUUAUGUUGUUGG<miR-196b>
+AGGCGGUCCCUCAGAUGGUU<miR-4061-5p>
+GAGCUCCUUGAAGUUCAAACG<miR159a*>
+UGUGAUGACUGUAUUAGAGAGA<miR-2851>
+GGACUGUUGUCUGGCUCGAGG<miR166b*>
+CAGCCACCGUUACUCUGCCACU<miR-449b*>
+AAGCGAGCAAAGAAGUAGUAUU<miR-974>
+UAUCACUAUUCUGUUUUUCGCC<miR-71*>
+CUGGGACUGGUGGCAGCACUU<miR-2287>
+UUUGUGACCUGGUCCACUAAC<miR-758>
+UAAGUGAAUUUCUUGCCACAGUC<miR-86>
+AUCAUAGAGGAAAAUCCAUGUU<miR-376b>
+AAAGGCUAGGCUCACAACCAAA<miR-690>
+GAAAGAGAGCCAGAACACAG<miR-1582>
+UUAUAUUUGAUUCACGUAGAGA<miR-2164-5p>
+AUAACAUUGUAAAGCGCUUCUUUCG<miR-3143>
+CUAGGCAAUGGGACAAAAUCA<miR-3308*>
+UCCCUGAGACCCUUUGAUUGUC<miR-125a>
+UGAUCAGCGAUGACCUAGUUG<miR1047-3p>
+UGCAUCCCAUGUGACCGCCCU<miR-1421n-2*,miR-1421s*>
+GCGGCGCGAGCAGAGAGGCGCU<miR-1560*>
+UGAGAUCACUGCGAAAGCUGAU<bantam-b>
+UUAAUGCUUAGCCUGUGUCCGA<miR-K12-11>
+CAGUCGGUUGCAAGCUUAAA<miR-75*>
+UACAUCGCCCGACCACUCUAU<miR3450>
+AGGCAGUGUAUUGUUAGCUGGC<miR-449b>
+UGCCAAACAAGUCCGAUCUACA<miR-2014>
+GGUGUUUCAGGGAAUCGUUA<miR-4076-3p>
+UUGGAUAGUGCGUUUUGGAUGUC<miR-2832>
+GGCCUUGUUCCUGUCCCCA<miR-4312>
+AGGCAGCGGGGUGUAGUGGAUA<miR-885,miR-885-3p>
+UGGGACAGUGGCUGCGCCCUCU<miR-1608>
+UGCCUGCUAUGUGCCAGGCA<miR-1271>
+UUUGCUAGUUGCUUUUGUCCCCU<miR-2022>
+UCUCAUCCCAUAACGGAGUCCCGA<miR-2573>
+CUGGGUAAUCGCUCUAGACCAU<miR-2720*>
+UUUUGCAUGACCCUGGGAGUAGG<miR-3680*>
+CAGGCAGCGAAAGCAAGUCUG<miR-1788-3p>
+UAGCUGUUGAGUCCCGUUGAGAA<miR-3263>
+UGAGAUCAUCGUGAAAGCUAGU<miR-81>
+AUGGAGAUAGAUAUAGAAAU<miR-620>
+UACCGUAGUGAAAGCGCUCCACGA<miR-3330>
+ACGGCGACUUUUCGUAGCGA<miR-2794>
+CAGGGUUAUUGGUUUUGUGUGA<miR-1555>
+GGAGGGCUUGCAGGCGGUGUGC<miR-1611>
+GUGUGAUUUGUGGCAAAGUGAU<miR-988*>
+AAUACGUUUUUCUUCGCACUGA<miR-2536>
+AGGCAAGAUGUUGGCAUAGCUGU<miR-31>
+UCAGAUCUACUUAAUACCCAU<miR-1174>
+CUGUGACACACCCGCUCCCAG<miR-3100-3p>
+ACUGGGGGCUUUCGGGCUCUGCGU<miR-637>
+CAUCAUACUGGACAGCAUUGGA<miR-200*>
+UUACCUAUUCCACCAAUUCCAU<miR2089>
+UGCAGUGAUGAGACCCUGGA<miR-2440>
+GUCCCUUGCAGGGGCUGUUGGGU<miR-623>
+UAAUUCGAUUCUUUAGAGUAUU<miR-2165-3p>
+UCCAAUUUGGGGAUUUGCUGAU<miR1854-3p>
+AGUGCUGCUAGCAACUACAAG<miR1153.2*>
+CCGGCAUGUCCAGGGCA<miR-4304>
+UGAGGGGCAGAGAGCGAGACUUUU<miR-423*>
+UUCACAAGAAGGUGUCUUUCAU<miR-3585-5p>
+AUGUAUAGCGAGCAAUGACCGUGU<miR-I4>
+UGGUAAGAUUGCUUAUAAGCU<miR844>
+UUGGACUGAAGGGAGCUCCU<miR319f,miR319g,miR319h,miR319e>
+AAUAAGUGAUUACCGAAAUU<miR2922>
+UUCACAGGGAGGUGUCAUUUAU<miR-513a,miR-513c>
+UGAAUGUGAGAAAUGUUAGAAU<miR809a,miR809d,miR809g,miR809f,miR809h,miR809e,miR809b,miR809c>
+UGGCUCAGUUCAGCAGGAACAG<miR-24,miR-24-3p,miR-24a>
+CACCCCCACUUGCAUGACCCUGA<miR-2431>
+UCAAAUGGAAGAAGCUGGUA<miR-2753>
+UGAAAUUGUUGCGAGUGUCUU<miR2678>
+UACUUUAGGUCUAUUGCAUGAUAAA<miR-3423>
+AAGGACCCGUGCGGGAAGGGA<miR1160.3>
+UGAAUCUUGAUGAUGCUACAU<miR172a>
+UCCAGUACCACGUGUCAGGGCCA<miR-770,miR-770-5p>
+UGCCCUUUUAACAUUGCACUG<miR-3590-5p>
+UUCGUUUUCUGGCAAUCAAAGG<miR-961*>
+GAGCUGGCCAGGCUGUGAGGG<miR533a*>
+UCUGUUGAAAUGUAAUCACCA<miR-1267>
+CGUACCGUGAGUAAUAAUGCG<miR-126>
+UAGUGCAAUAUUGCUUAUAGGG<miR-454,miR-454b>
+UCCCUGAGACCUCUGCUGCGA<lin-4>
+UGACAUUUUGCUCCAGAUUCA<miR2633>
+UGAGAACCACGUCUGCUCUGAG<miR-589>
+CGGGGAGGGAGGGUGGUG<miR-1408>
+AGCUGGGUUGAGAGGGUGGU<miR-320b>
+UGUUUUCUCUCAGGCUGGCAUUG<miR-M18-5p>
+AGAGGUUUAUGAACAUGAUGAG<miR-2799>
+UGAUUGAGCCGUGUCAAUAUC<miR170>
+GGCAAGAUGCUGGCAUAGCUG<miR-31>
+UAUUCAUUUACUCCCCAGCCUA<miR-664>
+AACAUAGAGGAAAUUUCACGU<miR-376c>
+AAGAUAAGCGCCUUAGUUCUG<miR852>
+UGUGUGAAUGUAAUGGAA<miR-4117-5p>
+UUCGUGCCAAGCUGUGUGCA<miR536f>
+CACUCUUUUUUCUUAUUCCU<miR-2297>
+UAAAAUGUAGACAUUCUAAGACGG<miR4352b>
+UUGGGACAUACUUAUACUAGA<miR-1302b>
+GCUGGGGAGGGCUUCGGAGCUCCUU<miR-612>
+ACUGACAGGAGAGCAUUUUGA<miR-3660>
+UUCGUUGUCGAUGAAACCUUGA<miR-981>
+AUCAUGAUGGGCUCCUCGGUGU<miR-433>
+AGGUUUUUUGGUUUUGUUUU<miR-1814a>
+UCACUGGGCAUAGUUUGUCGCA<miR-309b>
+UAUCCAGCAAGCAACAUCCACA<miR1169*>
+UCAGGAUUCUAGGCUUAGAGGU<miR-2432>
+UAAGCCAGUGGCGUAGAUUGCA<miR-978-as>
+UCGGACCAGGCUUCAUUCCCC<miR166l,miR166a,miR166,miR166n,miR166f,miR166c,miR166m,miR166k,miR166e,miR166h,miR166d,miR166i,miR166b,miR166g,miR166j>
+UGACUAGAGUUACACUCGUCA<miR-996>
+GGGCAAGAUCUCUAUUGGCAGG<miR399h*>
+CGGUACGGACAGGGGCAACAUU<miR-92a*>
+AACAACAGGAAUGUUAUGUAC<miR-3327>
+UGUGAGGUUGGCAUUGUUGUCU<miR-1294>
+UGUUCUGUGAUCUUAAAGG<miR-4016-5p,miR-4016-3p>
+GUCCCUGUUCAGGUGCCA<miR-1274a>
+AUGCGGAUGACAUUCACGUCCGUA<miR-2499>
+GUUGUACAUAUAUCACUACUCU<miR2608>
+AUGUGCUAAAAAGUCAACGGUG<miR806h,miR806c,miR806a,miR806b,miR806g,miR806d,miR806f,miR806e>
+AAGAUGGAGACUUUAACAUGGGU<miR-1969>
+AUGGCCCGAGGAUGUUGCCU<miR-2568b*>
+UGGACGGAGAACUGAUAAGGG<miR-184>
+UUUCACCUAUCGUUCCAUUUGCAG<miR-1010>
+UGCAUUGCGACGGGUUAUAUCA<miR-1397>
+CGAUCUUGUGGCAGGAGCUGAG<miR1861n>
+GCGAAUGGCACUGGAAGAAUUCAC<miR-263a>
+GUCGAGCCCCUGGGGCUGUCCG<miR-1363*>
+GUUCAAUAAAGCUGUGGGAAA<miR396a*,miR396b*>
+AAGUGACGGUGAGAUCCAGGCU<miR-UL112>
+UGCUUGAUCCAUGUCCAGAGUC<miR-B1-3p,miR-J1-3p>
+AAAGUGCAUGCGCUUUGGG<miR-350*>
+GGGACUUUGUAGGCCAGUU<miR-193a>
+UGCAGCGGGCUCAGGAAGGGG<miR3463*>
+UGAGUGCCGGUGCCUGCCCUG<miR-1909*>
+AGAAAGACAUGGGUAGUGAGAU<miR-71>
+ACAUUAAUGAAAACGAUCGUG<miR-3387*>
+AAUCGAGAUGCUGACCGAGAU<miR919.1>
+UUUGUCUCGUAACUGCCCUGAAG<miR-2040a>
+UAGGCAGUGUUGUUAGCUGAUUG<miR-34b>
+GAAAGACAUCAUGCUGAAUAGA<miR-743b-3p>
+CAGAAUCUAUUCUAGUGC<miR-239a*>
+AGGUGACUGCCUGGAAUUGGG<miR1032>
+UAGGGCCAUCUCAUCCAGAUA<miR-3109>
+AGUCAGGCUGCUGGUUAUAUUC<miR-344b-5p>
+GGCCACUGAGUCAGCACCA<miR-4252>
+UUUUGAUUGUUGCUCAGAAAGC<miR-315,miR-315a>
+UCAAUGCAUUGAAAGUGACUA<miR161.2>
+UAGCACCAUUCGAAAUCAGUGC<miR-285>
+UUGAAGAUGAAGUUGGUGU<miR-3526>
+UUAAUCAAGGAAAUCACGGUU<miR1509b>
+AAUGCACCCGGGCAAGGAUUUGG<miR-501*>
+UCAGUGCAUGACAGAACUUGGG<miR-152>
+UCAGGUCCUCGGUGGUUUAU<miR950a,miR950b>
+UGGAGCUAUUGUAUUUCACC<miR-755-5p>
+UAAAUGCAUUAUUUGGUACGACA<miR-277>
+UAGAACUGUCUUAGAAUGUGCUAC<miR4378b>
+UGGGUUAAAGGAUUUACCUGAGGCCA<miR-3096-3p>
+GACAUUCAGACUACCUG<miR-4262>
+AUACUUGAGAGCCGUUAGAUGA<miR3509-5p>
+UGAGGUAAAUACGGUUGGAAUUU<miR-984>
+UAAGGUGCAUCUUGUGUAGUUA<miR-18c>
+AAACUUUGGGAAUACUUUCGAG<miR-2582b>
+AGGGCGGGCGGCGACUGGAA<miR-2900>
+UUCCUAUGCAUAUACCUCUUUG<miR-202*>
+CACACCUCACUAACACUAACU<miR-253>
+UAGCAGCACAGAAAUAUUGGC<miR-195>
+CAAGCUUGUGUCUAUAGGU<miR-100*>
+CCUGACUCAUCCCCUUUGCUCC<miR-1676*>
+UUGGCAUUAAAGGAAGCUAGUU<miR-303>
+UUGGACUGAAGGGAGCUCCC<miR319b,miR319d,miR319c,miR319,miR319a>
+CGCUGCCAGCGGAGAACGAGUU<miR-1772*>
+AUGGUUCAAGAAAGCCCAUGGAAA<miR396e-3p>
+AAGAACGUGACACAUGACAAUCAA<miR1520j>
+UGGAGUCCAGGAAUCUGCAUUUU<miR-1289>
+UCUCGGCCAAGUCUGGCAGA<miR1147.2>
+GGCUCCAGUCUUAACUACAGGC<miR-1712*>
+UGAACUUUACCAUGGAACCGGG<miR-1502>
+UAAAGCUAGGUUACCAAAGCUA<miR-79>
+UGUGGGUUGACAGUGCUGAGGU<miR-3534>
+UUAUAAAGCAAUGAGACUGAUU<miR-340-5p,miR-340>
+AUUGGGAACAUUUUGCAUUCGU<miR-450c-3p>
+ACAGUAGAGGGAGGAAUCGCAG<miR-936>
+GCGCUGCGGGUCCGCUGU<miR-4103-3p>
+UGGCAAGAAAUGGCAGUCUAGA<miR-74>
+UGGAUUUCCCAAGAUCCGUGAU<miR-1986>
+UACUGGAGUUCUCAACAGC<miR1161a,miR1161b>
+UCUGGCUGCUAUGGCCCCCUC<miR-3085-3p,miR-3085>
+AUAUGGAUUCAGAAUGCAGGU<miR1852>
+AGGAUACAUUCAGUAUACGUAUA<miR-iab-4-as*>
+AGGCAUGGGAGGUCAGGUGA<miR-3622b-5p>
+UGCGGAACCGUGCGGUGGCGC<miR1427>
+UUACAAUGUCCAUUGAUUAAG<miR475c>
+CCAGACACUCAGAAACACGA<miR-4047-5p>
+UAGCCAAGGAGACUGCCUACG<miR169e>
+AGCUGCUUGUUGGCUGGGGAG<miR-1764>
+AGAGGCUGGCACUGGGACACAU<miR-1962>
+UACAAAGUAUUUGAAAAGUCGUGC<miR-85>
+AGAAAACCUGGUAUGGAUUGUU<miR-1422c>
+UCACCGGGUGAAAAAUCACCUA<miR-41>
+UGUAAACAUCCCCGACUGGAAGC<miR-30d>
+AGCCACUAACGACACUGCUCCU<miR-34*>
+CAAGAAAUUCAUUGGUUAAUUUC<miR-2177-5p>
+UAUGGCUUUUUAUUCCUUUU<miR-135b>
+CAACAACAACAAGAAGAAGAAGAU<miR1134>
+CGAAUCAUUAUUUGCUGCUCUA<miR-15b*>
+UCAUCACGUGGUGACGCAACAU<miR-592*>
+AUCAAGUGAGGUCAGAUCUUGG<miR-1996b>
+UUUGGCACUUUUUAGAGUGAA<miR-507>
+GACCUGGACAUGUUUGUGCCCAGU<miR-619>
+AUAGCUCUUGGAAUGGUUCUGC<miR-458>
+UCGAAUGUCGCAGGACGUGCUGGCU<miR-3416>
+AAUCCUUGGAACCUAGGUGUGAGU<miR-362-5p,miR-362>
+AACGUCCAAUCAGAACGUGACAUG<miR1520h>
+UAAUCUCAGCUGGCAACUGUG<miR-216,miR-216a>
+UGAGCCUCUGUGGUAGCCCUCA<miR771>
+UUCUCGAGGAAAGAAGCACUUUC<miR-516a-5p>
+AGGAGGCAGCGCUCUCAG<miR-650c>
+AGUCAUACACGGCUCUCCUCUC<miR-485*>
+ACCCAGCUGCGUAAACCCCGCU<miR-K12-9*>
+GAACGCGCUUCCCUAUAGAGGGU<miR-523>
+UAAAAUCGUGACAUGUGACGGUCA<miR4372>
+UGGCCAAGGAUGAGAACU<miR-3096-5p>
+UGAUUGUAGCCCUUUUGAGUAGA<miR-508>
+UAGCACCAUGGAAUUCAGCUG<miR-998>
+UCUAGUUUGUGUUCAGCAUC<miR2866>
+UUUGGAUGAUUCAAUUGUGAU<miR1078>
+UCUUCCCUACUCCUCCCAUUCC<miR482a,miR482b>
+AUAGUAGACCGUAUAGCGUACG<miR-411>
+UGGAGGCAGCGGUUCAUCGAUC<miR162*>
+AAGCCCAGGAUGGAUAGCGCC<miR390>
+GAAGAAUGCCGAUCCGGUCAGCC<miR-36-5p>
+GAGAUAGAAAUAAGAACU<miR-1411>
+UUGUGCUUGAUCUAACCAUGCA<miR-218b>
+UCUUUGGUGAUUUUAGCUCUAUG<miR-9b>
+UGUGGUGGGAGGACAGUGAUGU<miR-1553>
+AAUGUUGCUCGUUGAACCCCU<miR-409>
+AGUCUGGUUGCUGGCUAUAUUCCA<miR-344d-2*>
+AGACCAGACCAUGCACAGUGGG<miR-rL1-12-5p>
+UGGCAGUAAGAUGAUUUAGUACC<miR-1472>
+GGUUGUGUGGUUGUGUGUGU<miR-2304>
+AAAGCUGGGUUGAGAAGG<miR-320e>
+AAUGGACUAAAGAGAAAGGGGCCG<miR4394>
+CAUUUUUUGUUCUGUUAUAGU<miR-4155-5p>
+UGUUUGGUUUUUCGUUUUCC<miR-2386>
+AGUGUAAUACCCAUGGAAGCAUU<miR-1495>
+AAGUGCUUCCUUUUAGAGGGUU<miR-520f>
+GAGCUCGUCUAUUCAUUUUGA<miR-3267b>
+UACAGUUGUUCAACCAGUUACU<miR-582,miR-582-5p>
+ACUUUUGAACUGGAUUUGCCGA<miR2949a>
+GUAUUCAUACCUGGCCGAUG<miR-3381*>
+GAAGUUGUUCGUGGUGGAUUCG<miR-382>
+UGACAGACUUAGUACUACAUGA<miR-3559-5p>
+CUACUCGGUGAGUAAGGAUAGC<miR-1729*>
+GUGACUCGAGACGAGUGACCGGU<miR-m108-2-3p>
+UGACGCCAUCGCGUAUUGGUU<miR-4102-3p>
+AAGCGUUCGCACUUUGUCCUA<miR-H11*>
+AAGGUGCCAUAUCCAGGGACC<miR905>
+UGAGGUAAUCAUCGUUGUCACU<miR-794>
+UUGAGUCGCGCCAAUAUCAUG<miR171c>
+UUUCUGACCACCACCGGCCUCU<miR-1401>
+UUCACAGUGGCUAAGUUCCGC<miR-27a>
+UGGCAAGACAAGGCAGUCUAC<miR-74b>
+UGACAGAAGAGAGUGAGCACA<miR156c,miR156d,miR156b,miR156a,miR156>
+CACUCAGCCUUGAGGGCACUUUC<miR-512-5p>
+AGAGUUGAGAUCGGGUCGUCUC<miR-M1-5>
+UGUGUUGAAAAUCGUUUGCAU<miR-287>
+CUGCUAUCCUUUUCCUGUUGCA<miR853*>
+GAGCUGCCCUCAGAAAAACUCU<miR-1822>
+AGGAUUAGAGGGACUUGAACC<miR2275c-5p>
+UAAGGCACGCGGUGAAUGCUU<miR-124a>
+GUGAUGGAAAUCGCUAUUUCA<miR-2171>
+GGUAACCUCUGCGAUCGUUCGGU<miR-H5*>
+UCCCUGUCCUCAAGGAG<miR-3586-5p>
+AACAAUAUCCUGGUGCUGAGUG<miR-338*,miR-338-5p>
+CACUUAAUAGACCGCAACCUGC<miR-3066*>
+GCUGGUGACAUGAGAGGC<miR-4299>
+UGCACGGCACUGGGGACACGU<miR-3177>
+UGAGAUUCUACUUCUCCGACU<miR-1175*>
+ACCUCCAAAGUGAUUGUGAAU<miR-752-5p>
+AAGUCAUCAACAUAAAAGUUG<miR821a,miR821c>
+AAUGCGUUGAAUAACGUUUUAC<miR-2536*>
+UGGAUGGUGUGCAGGGUCAAA<miR1221-5p>
+AGGGAGGGAUGGUUAUGCAAG<miR1211*>
+GUUUGAUCCUUUACGUUUAU<miR2641>
+UGCUUCCUUUCAGAGAGU<miR-516a-3p>
+AGAUUUUCGAGAACAGCUAAUU<miR-2810>
+AGGGUGUUGCUCUCAUCUCU<miR-609>
+UCACCGGGUGUAAAUCAGCUUG<miR-39>
+UACGACCCACUGGAAACUAAA<miR841>
+UGGUAUUGUUUCGGCUCAUGU<miR171h*,miR171k*>
+UCACAGUCAACUGUUGGCACGG<miR-250>
+CUGGCUGGGGAAAAAGAUUGG<miR-664-1*>
+AGCUUUCGACAUGAUUCU<miR-80*>
+UAUGUGAAAGUAAUGGUG<miR-4214-5p>
+CCUCGCCGGCGCGCGCGUGCA<miR1848>
+AGAUAAUGAUGACUAACUGAAU<miR-2335>
+AGGUCAGAGGUCGAUCCUGGGC<miR-540>
+UGCCCUAUCCGUCAGGAACUGUG<miR-1984>
+AGGCAGGAUCACAAGGUCUGGA<miR-1806>
+UAAUACUGUCAGGUAAUGAUGUC<miR-8>
+UAUACCAGGAUGUCAGCAUAGUU<miR-1949>
+AGCACCACGUGUCUGGGCCAUG<miR-770-5p>
+AGGGCAUAGGAGAGGGUUGAUAU<miR-3945>
+AUUGGUACUUCUUUAAGUGAGA<miR-547>
+CGAGGCUUGCGAAAUAAGUGUGC<miR-1833>
+UAGCAGCACACAAAACUAUC<miR-15-5p>
+UUCACAGUGGCUAAGUUCCGCU<miR-27a>
+CAGGUCGUCUUGCAGGGCUUCU<miR-431*>
+CAAAGUGCUCAUAGUGCAGGUAG<miR-20b-5p,miR-20,miR-20b>
+GUAGGUACCCAAAUAUCUUGAU<miR-2558>
+UUUGCAUUGUAAUACACUGUUA<miR-2804>
+UAUCGUAUCCUAGGUUGGUUU<miR1849>
+UGGGGACGUAGCUGGCCAGACAG<miR-3191>
+CGACAGAAGAGAGUGAGCAUA<miR156l>
+UUAGGACGAAGUGCGAACGCUU<miR-H12>
+ACAGUCCACUGAGGUUGGAGC<miR-622>
+UAGAGUUACACCCUGGGAGUUA<let-7c*>
+UAAAUGCACUAUCUGGUACGACA<miR-277>
+CACGUUACAGAUUGGGGUUUCC<miR-1889,miR-1889*>
+AAUCAGAACAUGACAUGUGACAAU<miR1520m>
+GCGGCGAGUCCGACUCAU<miR-4285>
+UAUUCAGAUUAGUGCCAGUCAUG<miR-871-5p>
+CGCAAAUGAUGACAAAUAGA<miR3512>
+UGGCGGCCGCGGGCUUCGU<miR2925>
+UGUGAACUGGUCAUGCUCUUAA<miR-3048>
+UGACUAGAUCCAUACUCGUCUG<miR-279c>
+AGGUGGUCGCUUGAGUUGCAGU<miR-1421q>
+AUAAUACAACCUGCUAAGUGCU<miR-374c>
+AGUUCUUCAGUGGCAAGCUUU<miR-22*>
+UAGAUGGCGUAACAGGCAACUU<miR-rL1-34-5p>
+ACUGUCAGACCACCUCUGCC<miR-2368*>
+AAACAGACAUACCAAUGCAG<miR-3480-3p>
+AAAGUGCUUCCUUGUAGAGGG<miR-520b>
+UGUAGUGUAGCAUGCCCGUU<miR2617b,miR2617c,miR2617a>
+UUGUAGUGCAUAUUUGUUUU<miR1044-3p>
+UGUGGGUUGUGGGCUGUGUGG<miR-966>
+AAGUGUACCCGGAUCUGAUAUCC<miR-2208b-5p>
+AAUGGAAUUGUUGAUGUGG<miR-4145-3p>
+AAGCUGCCAGCUGAAGAACUGU<miR-22a>
+UUUGUACUCCGAUGCCAUUCAGA<miR-238>
+AACCUUGUAGUUUCGUUGUG<miR-3501>
+UAUUGUAUGUUGUAUUUGCAGU<miR-2489>
+CUGCGGGGGAGGAGGGAGGGGG<miR-1770>
+AGGCCAGAAUAGUGUAGUUUGUA<miR-2218a*>
+GAGUGGGGUUUUGACCCUAACC<miR-1296>
+AAGCCUGCCUGGCUCCUCGGG<miR-596>
+AAAAAGUUCGUUUUGGUUUU<miR-2284c>
+ACAGGCUCGUUUCUACGGAUCA<miR-100*>
+GUGAAAUGUUUAGGACCACUUG<miR-203,miR-203a>
+GUAAAUGCUGCAGAAUCGUACCG<miR-734>
+AAACAAACAUGGUGCACUUCUU<miR-495>
+CGAGGCAUAUUUGCAGGGAUU<miR2675b,miR2675a>
+AAGCAAUACUGUUACCUGAAAU<miR-3942>
+GUACGAUUCGCAUUGCCCAUU<miR-1330>
+GGCUGUGUCACUUCGAGCCAGC<miR-31*>
+UAUUGCUUGAGAAUACACGUAG<miR-137>
+CAAGGCCGGAUAUAUGGGAUC<miR-100*>
+UUCCGGAGGACUACCAUCACA<miR3466>
+GUUAUAGAUCUGGAUUGGAAC<miR-607>
+ACCUAGGAAUUUUGCCACAG<miR-4131-5p>
+CCAAUUUUUAUCAAGGAAAGC<miR-1176>
+UUCAGUCAUUGUUUCUAGUAGU<miR-725>
+CUACAAAGGGAAGCCCUUUC<miR-518a-5p,miR-520d-5p>
+UAUUGUACUGCGACUCGGGCCA<miR-2524>
+UAUGACACUGUAACAUGUCCUGG<miR-64e>
+CAUCGUGCAGAGGUUUGAGUGUC<miR-955>
+AAGUGAGAUCAUGUGAAAUCCUCGG<miR-1021>
+UGUGUUCUUGUACCUGGGAAG<miR900-3p>
+GACAGAGUGUGUGUGUCUGUGU<miR-3082-5p>
+UACUUUCAAAGACGUUGUUGAG<miR4374b>
+AACCAGCACCCCAACUUUGGAC<miR-634>
+UUCAACAGUACCGAUAUUGUGA<miR-2024b>
+UCAUCAUUGUUGGUUGUCAG<miR-2b-5p>
+UCACCAAGCACUUGUCGGGCUAU<miR-1758>
+UCACCAAAGUGCCUGAGCUCA<miR1115-3p>
+UUAUUGCUUGAGAAUACGCGUAG<miR-137b>
+UCCAAUGUAAUCUAGGUCUAC<miR2088b>
+AGAACUCCGGCUGUGACCUGUG<miR-11*>
+UGCAGUCCAUGGGCAUAUACA<miR-455>
+UUCUUGUGUUCUAGCUGGGGGU<miR1057>
+CACUGUGGGUACAUGCU<miR-4318>
+UCCGACCUCGCUGUAGGAGAA<miR3461*>
+CGGUUACGUGAUUAUUAGGGG<miR-2150>
+CCGGUGACUGGAAGCAGCGUUGA<miR-1689>
+AAAUAGAAAAGCUUCCGGUUUU<miR-2051*>
+UGACUAGACCGAACACUCGCGUCCU<miR-286a>
+UGCAAGCGCUGUGGACUUGGCA<miR-932*>
+CAGGUAAAUCUUUCAGCUUGUC<miR-4049-5p>
+CGAAGAGAGAGAGCACAGUCC<miR529g>
+UAGCACCAUGAGAUUCAGC<miR-998>
+UGAGGUAGUGGAUUCUGU<let-7f-5p>
+UGUCUUGCAGGCCGUCAUGCAGG<miR-431>
+UUGAGAUAAGACAGAGGAUAUU<miR-1452>
+UCGGGGAUCAUCAUGUCACGAG<miR-542-5p>
+GAGUGCUGGAAUUAAAGGCAUG<miR-1186>
+UGGACGGAGAAUUGAUAAGGGU<miR-184>
+GCGUCACUUGUGGUGUAGGCGA<miR-3485-5p>
+GAGCACCCCAUUGGCUACCCACA<miR-3102>
+GAAAGACCAAACGAGAAGCUGCAU<miR4346>
+GGUGCAGUUACUGUGGCUGUGG<miR-1930*>
+CACUGGCUCCUUUCUGGGUAGA<miR-892b>
+AAGGAGCUCACAGUCGAAUG<miR-28>
+UGUUUCAGUCAUGGUUUCUAC<miR1075>
+UUUGACAAAGACAGAAGGAGCU<miR-1678>
+CAUCAGUGGGUAUUUGAAGUU<miR-2026*>
+UGCUGCUAGAUGGUGAAUC<miR-133b-5p>
+UUCAUGUCGGGGGUGUUUGUG<miR-H16-5p>
+CUAGUUUUGCAUAGUUGCACUA<miR-19a*>
+UUAGCCCCUCCCCAUCAUCUUG<miR-rL1-18>
+GCCCGCGUGUGGAGCCAGGUGU<miR-1471>
+AGGAAUGCUAUAACAAAGUCA<miR1112-3p>
+UGAAAGACAUGGGUAGUGA<miR-71>
+CCAGUGCUGUUAGAAGAGGGCU<miR-1960>
+CAACCGGAAAGGGGAGCAGCA<miR853>
+CCGGAACCCAAAGACACGUGCCCG<miR-rR1-5>
+AGAGAAGAAGAUCAGCCUGCA<miR-1253>
+ACUACGUGAUGCGAUCUGAUG<miR-1800>
+AACUCUGAUUCUAGAAUUUUUG<miR2090>
+GAGCUUAUUCAUAAAAGUACAG<miR-590-5p>
+AUCAGGGCUUGUGGAAUGGGAAG<miR-3127>
+UGCCAAAGAAGAUUUGCCCUG<miR399k>
+GAUGGAAGGGAAAGGCAAACC<miR-M15*>
+UACUCCAGAAUGUGGCAAUCAU<miR-509-5p>
+UGGAAGACUAGUAAUUUUGUUGU<miR-7d>
+UAAAGAUCCAAGGGCCACC<miR-4075-3p>
+ACCCGAGCGGUCUGAGCAAACU<miR-375>
+AAAGUGCAUCCAUUUUGUUUGU<miR-291b-3p>
+AGGUAAGGUCCUACAGCGU<miR-4156-5p>
+GAGUGAGGGUGGCGAGCGCGU<miR-B20>
+UAGCACCAUUCGAAAUCAGUAC<miR-285>
+UGAGGGGCAGUGAUAGAAAGGA<miR-3573-5p>
+UUUGUUCGUCCGGCUCGCGUUA<miR-375>
+UGUAAACAUCCUCGACUGGAAG<miR-30a,miR-30a-5p>
+UCCGGCAAGUUGACCUUGGCU<miR169g*>
+CAAUGGUGUGAGCUGGGAUGG<miR-3530>
+GGUCAAGAGGCGCCUGGGAAC<miR-351*>
+AGCCACUGACUAACGCACAUUG<miR-210*>
+ACAGCGCAUGCAAUGUGGACA<miR-460b*>
+AGUGUGAAAUCUGCCUGAAAGUC<miR-1769>
+CCUUUUUGUGGUUUGGGGCUUUU<miR-129>
+UAAAGCUAGACAACCGAACGU<miR-9b*>
+UUUUGAAUGUUGAAUGGUGGCUAU<miR857>
+UACUUGGAAAGGCACCAGUU<miR-890>
+AAAGGGGUCUGCAACCAAAGG<miR-H7>
+GGGCCAGUUGGACAGGAGC<miR-575>
+CUUCCAUCGGAGCUGGGUAG<miR3454c*>
+GAUCCCGCCUUGCACCAAGUGAAU<miR168a-3p,miR168-3p>
+UCACAAGUUAGGGUCUCAGGGA<miR-3588,miR-125b-as>
+UGGCUUGUGGUGGAACGGGCG<miR-1610>
+CUUGGCACUGGUAGAAUUCACUG<miR-182>
+UAUGGCUUUUCAUUCCUAUGUGA<miR-135b>
+UGAAAGACACAGGUAGUGGGAC<miR-71b>
+AGUCAUUGGAGGGUUUUGAGCAG<miR-616>
+CCAGUUAGGGUUUAAUGGUUC<miR-1177>
+AAAGUGCUAUCAAGUUGGGGUAG<miR-430b>
+UUGUGUGUACAUGUACAUGUAU<miR-466l-5p>
+UGGAACAUUCCAGUCGUUCGUA<miR-3243>
+UAACAACAUUGGAUGAGGGUUGGA<miR4408>
+UGUGGUUAAGUUGGUGCA<miR-4020a-5p>
+UUUUUUUUCUAGGACAGAGGGAGU<miR1867>
+UACAGGAAUGUUGUGAUAAGCUCUG<miR-3317>
+AUAAUACAUGGUUAACCUCUCU<miR-655>
+UGGAGAGCAGUUAACGUGCGUUC<miR-rR1-7-5p>
+AGAGCAAGGCUGAGGCUGUUCU<miR-2987>
+CGAGGGUCGUGCCUGGUUUUGCU<miR-1565>
+AGGGUAAGCUGAACCUCUGAU<miR-555>
+UUUUUCCUACUCCGCCCAUACC<miR472>
+CCGGCGAGAAGCUCGGUGUGCU<miR-2808d>
+AUCAGGAGAGAUGACACCGAC<miR1432>
+UGAGCGCCUCGGCGACAGAGCCG<miR-339-3p>
+UUGUAGAGUCAUGCACCUCUG<miR1223g,miR1223e,miR1223f>
+GAAAAGUUUGUUCGGGUUUU<miR-2284m>
+UCACCUGACCUCCCAUGCCUGU<miR-3622a-3p>
+CAUUAUGGAACGGAAGGAG<miR1132>
+UAGCAGCUCAUCUGGUAUAA<miR-4142-5p>
+UCUGCAAAGGGAAGCCCUUUCU<miR-1283b>
+UGACACUGCGGGUACCUCUUU<miR-1715*>
+UGCAAUGCGUCUGAGCUCCGU<miR-1421ab-2*>
+AGGAUGAGCAAAGAAAGUAGAUU<miR-1255a>
+UAGGUAGUUUCAUGUUGUUGG<miR-196,miR-196a>
+AGAUGCCAGAGAGACUGAAAU<miR-M16*>
+GUUGUGUGUUUUCUUAUUUC<miR-2345>
+GAAGAGAAUCGGGUUGGAACGGU<miR-m01-2>
+AGCCACUGCCCACCGCACACUG<miR-210*>
+CUUAUGCAAGAUUCCCUUCUA<miR-491>
+UCAGGCCAGGCACAGUGGCUCA<miR-1972>
+UAAUACUGCCUGGUAAUGCCAU<miR-429b>
+UACAAGACAUAUGUUUUCUUGAU<miR-1422o*>
+UGUUCAGACUGGUGUCCAUCAU<miR-743b*>
+UUGGUUACCCAUAUGGCCAUC<miR774>
+CUUGGCACUGGGAGAAUUCAC<miR-263b>
+UGCCUCCACCCAUCUUAGAUAUG<miR-3273>
+AUAUACAUACACACCCAUAUAU<miR-669l*>
+UUCCCACCUCGGUCUCCUCCUC<miR-H9-3p>
+UAUGGCUUUUUAUUCCUAUGUGA<miR-135,miR-135b,miR-135a,miR-135a-5p>
+AUUGAGUGCAGCGUUGAUGA<miR397>
+ACAGAUUCGAUUCUAGGGGAA<miR-10b*>
+UAAUCUCAUCUGGUAAUUGAAGU<miR-747-5p>
+CAUCAGAGGGAUAGGAUGGAC<miR-1700>
+UUUUAAACUCUAAUGGGAGAGA<miR-1305>
+AGCGCCAUUUUCAGAGCUAUA<miR-458*>
+UACAGUUGUUCAACCAGUUACUA<miR-582>
+CGGUGCUGGUGGAGCAGUGAGCAC<miR-667*>
+UAACUUCAGCGCCGAGGGUGGAC<miR-1418>
+UCUUACGGCCCCUAAACUUUUCA<miR-2156a>
+AAGUGCCUCCUUUUAGAGUGUU<miR-519e>
+UUGAAGGAGUUCAGUGGUACA<miR1222e>
+UAUGUAACACGGUCCACUAACC<miR-411*>
+UGAGCUUCUCUUCCAUGACUGUGC<miR-2698>
+GUAAAGGCUGGGCUGAGA<miR-1971>
+GUUACCUACAAGCACGUCUCGA<miR395f*>
+AACCCGUAAGGUCUUAACUUGUG<miR-2003>
+UCACCGUUAAUACAGAAUCCUU<miR3514-3p>
+CACUGUGGAUCUUGUCCUAUAC<miR-4065-5p>
+UAAGUGCUUCCAUGUUUUAGUGA<miR-302a>
+AAUCACUAACCACACAGCCAGG<miR-34c*>
+ACUGCAGUGAAGGCACUUGUAG<miR-17a-3p,miR-17*,miR-17,miR-17-3p>
+UGUUUGAGUUCUGGACCUGGA<miR-2772a>
+AGCAGGUCAGGUGUGGUGCAGU<miR-1421ai>
+UAUCUUUCUAUUUUCCCACAG<miR-4083-3p>
+ACAUCUUCUUGCCUAACUCGCC<miR-48*>
+UGUAAGGAGCAGAAGUGUGAAGC<miR-1793>
+UGAAGAAGAUACGCAAGAAAG<miR835-3p>
+UGGGUAGAGAAGGAGCUCAGAGGA<miR-3132>
+UCACCGGGUGAAAAACGGUUAG<miR-39>
+UUGGAAUGAAACGAGUGAGUCAGC<miR-2242>
+AAGCUGUGGGCUUUGCCUAA<miR-4049-3p>
+AAGCUUAUGUUCAUGUAUGC<miR-4012-5p>
+UGUGUUAACUCAGGUCACCCCUG<miR398c>
+AGGUGGGCAUACUGCCAAUG<miR394b*,miR394a*>
+UUCACAGUGGCUAAGUUCUGCA<miR-27b>
+ACCUUGUUUGUUGCUGCUCCU<miR-354>
+UGAAACCGUCCAAAACUGAGGC<miR-957>
+UGCUUUUAACGCGGAGCUUUAGU<miR-124a*>
+UUUAGAAUAAGCUUGACUUUUG<miR-651>
+GACUGGAGCUUGGAGCGGUGAGC<miR-3081*>
+UACAUACACACAUACACACGCA<miR-466m-3p>
+UGCGGUAUCCGUGAACCGCCCUGAC<miR-3359>
+AGGAGGUCGUAGGUCAUGCAGA<miR-1421am>
+AACCGUGGCUUUCGAUUGUUAC<miR-132*>
+UCCUCUGAGCUCAGCUUCGCCUCU<miR-1650>
+GGCAAGACUCUGGCAAAACU<miR-269>
+CGGGGAGAGAAAUCGACGAGGCU<miR-14*>
+AAUCCUUGCUAUCUGGGUGCUUAGU<miR-500*>
+UAUUAUGCACAUUUUCUAGACC<miR-60>
+UAGCAGCACGUAAAUAUUGGC<miR-16b>
+AUGAGCAACGCGAACAAAUCC<miR-356>
+AUAUCCGGCUCGAAGGACCA<miR-2779>
+UCGCCUCCUCCUCUCCC<miR-1281>
+CGUAGAAUCUACCAUCGGAUC<miR-2808b>
+GAAAGCGCUUCUCUUUAGAGG<miR-518f>
+AAGUGCCCGACGCGGGGAACGUG<miR-B6>
+GAGGGUCUUGGGAGGGAUGUGAC<miR-1182>
+CUGUUUAGUUCACAUCAAUCUU<miR1850.3>
+UGGACGGAGAACUGAUAAGGCU<miR-184>
+UCUGUGCUCGGGGAGGCAGGGA<miR-2455>
+AAUUCUGGACAAGUGCCUAC<miR-96-3p>
+CGCCAAAGGAGAGUUGCCCUG<miR399i>
+ACUGAUUAUCUUAACUCUCUGA<miR-3920>
+AAUCGUCGUUCGGGAUCCGC<miR-1742>
+CAGUGCAAUGGUAAAAGGGCAU<miR-130c>
+UAUCGGAAGUUUGGGCUUCGUC<miR-BART18-3p>
+UGCCUGGGUCUCUGGCCUGCGCGU<miR-661>
+CACCCGUAGUCCGUUAUCGUCU<miR-2233>
+CAGGAUGUGGUCAAGUGUUGUU<miR-1265>
+UUAGUCCUAGUCUAGGUGCACA<miR-1543>
+CCCAUAAAGUAGAAAGCACUA<miR-142>
+CAGUGCCUCGGCAGUGCAGCCC<miR-33b*>
+AGGGAGAUGCUGGUACAGAGGCUU<miR-1941-5p>
+ACAUUUUUAAGU<miR-M3*>
+UUGAACAUGGUUUAUUAGGAA<miR867>
+AGGGCAUGUCCAGGGGGU<miR-4253>
+UGCAUAAUACGGAGGGUUCU<miR-M12>
+UAUGUGUUCCUGGCUGGCUUGG<miR-1198-5p>
+UCACAGUUCUUGAUUACCCAC<miR3433>
+GUGAAGUGUUUGGGGAAACUC<miR395t>
+UAUUGGCGUGCCUCAAUCCGA<miR171l*>
+UACCACAGGGUAGAACCACGGA<miR-140>
+UCACACCUACAAUCCCUGGCA<miR-2191>
+UGAUUGUCCAUACGCAGUUCUCA<miR-219>
+CUCCAGAGGGAAGUACUUUCU<miR-520a-5p>
+AAGUAUGAGGAAAUGGAGCUCU<miR-1684>
+AAAGUGCAUCCAUUUUGUUAGU<miR-291b>
+UGAGCCCCUGUGCCGCCCCCAG<miR-1225-3p>
+CUUCCCUGGGGGUGCUGGUA<miR-4095-5p>
+UGGGAAAUGCAAAGAGGGAAG<miR-3564>
+GGGACCCUGGGAGAGAUGUAAG<miR-711>
+CACAGGUGGGAAGUGUGUGUCCA<miR-3097-5p>
+AAUCUCUUGGUGCUUAUUCGC<miR3702>
+UGGCUCAGUUCAGCAGGACAG<miR-24b>
+AAGCCCUUACCCCAAAAAGCAU<miR-129b-3p,miR-129-2*,miR-129-2-3p,miR-129,miR-129*,miR-129-3p>
+UGGAUAGGAGUAUGGGCUUGAG<miR4395>
+AAUUGCACUUGUCCCGGCCUGC<miR-92,miR-92b>
+GGAGGACGAGGCUGCGAGCGGA<miR-1694>
+UAGUCCUGCACGAGGAAGGAGC<miR1155>
+GUGAGUUGAUCGAUUUCGAGUU<miR-1005*>
+UGUCAUGGAGUUGCUCUCUUAA<miR-281>
+AAUCGUACAGGGUCAUCCACUU<miR-487b>
+AACAUUCAACGCUGUCGGUGAG<miR-181a>
+AUUUCACUCUUUCAACUGUU<miR-4060-5p>
+CAGUCAUGCCGCUUGCCUACG<miR-707>
+AACUCAUUCAUUAACCAGCUUUU<miR-1632*>
+UGGGCGGCGUUUGCCUCUGGGAAC<miR-2532>
+CAGUUUGUGAGUUUCUAGGCAU<miR-61a*>
+CAAAAACCACAAUUUCUUUUGC<miR-548d-3p>
+UUCCCAGCUCCGACGGGAUGG<miR3454b,miR3454c,miR3454a>
+CAAGUAUCAUGUGUUGGUAUC<miR-353>
+UAAAAUAUUGGUUUAGUUUUU<miR-4106-3p>
+UUCGUUGUCGACGAAACCUG<miR-981>
+GGUACAAUCAACGGUCGAUGGU<miR-3570>
+CUGGCGGCAACUGCGACAGCGA<miR-2525>
+UUCCAUCUCUUGCACACUGGA<miR2950>
+UUGUGAUGUGAAUGAUUCAU<miR2105>
+AGGGACCUUGCCUGGGUUAU<miR-2777>
+UGCACUUAAAGAUGAAGCCGGU<miR-938>
+UGUAGGCAUGGGUGUUUG<miR-272>
+UAGAGGAAGCUGUGGAGAGA<miR-3125>
+UUAGGAAGUGAUUUCUUCAGGC<miR-1334>
+GAAAGACACCAAGCUGAGUAGA<miR-743a>
+UGUGGGUGUGUGCAUGUGCGUG<miR-669>
+CCUGACUUCUCUCUUCAUGCAG<miR-3583-3p>
+GACGGGUUGGUUUUGCAUGU<miR-4036-3p>
+UGGCAAGAUGGUCGCGAAACUUCC<miR-1469>
+UGGACACCAGGAGAUCUUCAU<miR-2986>
+UCAAUUCCGUAGUGCAUUGCAGU<miR-932>
+AAGGGAGGAUCUGGGCACCUGGA<miR-1943>
+UGUUAUACCGGUCAUCUGAAGA<miR-2540>
+CCUGAGGGGAAAUCGGCGGGA<miR2096-3p>
+AGGAACUUCCCAAGGAACAG<miR-4001i-5p>
+UCUGCGACUGCAUCUCCACUC<miR-1780>
+UCACAUCAGGCACAGUUACAGGGG<miR-3354>
+UCACUGGUUAUCCUCUGUCGAA<miR-359>
+AUUAUUGUCAACGUGACUAG<miR2635>
+UGUCAUGGAAUUGCUCUCUUG<miR-281>
+UCUACAGUGCAUGUGUCUCCAGU<miR-139>
+UACUCAAAAAGCUGUCAGUCA<miR-888>
+UUCCCUUUGUUAUCCUAUGCCU<miR-204b>
+CAUACACGGCUCUCCUCUCUUC<miR-485*>
+UAUAUCGCCUUUUGAGGUUAUU<miR-2043a*,miR-2043b*>
+UGGCAGAGAUGGCACGUUGAU<miR-2065>
+CAGUGACCAGACAUAUCCCU<miR-190-3p>
+UAAUACUGUUAGGUAAAGAUGCC<miR-8-3p>
+CACCCGUACAUAUGUUUCCGUGCU<miR-52>
+UAGAUAGAAUUCGUCGGUGGAUAA<miR-2770>
+AUGACUGACAUGGACU<miR-2917>
+GGCUUCUUUACAGUGCUGCCUUG<miR-103-1*>
+AUUGGAGUGAAGGGAGCUCGA<miR159f>
+AAGUUGCCCGCGUGUUUUUCG<miR-543,miR-543*>
+UGCUGACCCCUAGUCCAGUGC<miR-345-5p>
+AAAUGCCCAGUGAAUUUCUCGGU<miR-2177-3p>
+UUUGUUUUAGCCUGAGCUAUGU<miR-355>
+CUCGGGCGGGCGGAGCGGCAC<miR-1576>
+UCGGUUUGCUUCUUUGAUAGAUUC<miR3636*>
+AAUAUUAUACAGUCAACCUCU<miR-656>
+GGUUUAAACUUCGAAAUG<miR-1387>
+CCCGUUCUGGAUGCUGUGGGAC<miR-M1-14*>
+CCAGCAGUGGACGUCUGUG<miR-2723>
+CGGGACAGGACGGCUCUCGGA<miR-1566>
+UACAUGCGUAUAUUCUGGCAG<miR-1613>
+UGGUCUUGAGGCAGGAACUGAG<miR1861d>
+CUAAGUAGUAGUGCCGCAGGUA<miR-252b>
+AGGAUACAUUCAGUAUACGUUUA<miR-iab-4-as*>
+ACACACCAAGGAUAAUUUCUCC<miR-3576>
+UGCACCAUGGUUGUCUGAGCA<miR-767>
+AGUACACGUUUCUGGUACUAAG<miR-992>
+UUCCCUUUGUCAUCCUUUGCCU<miR-211>
+GUAGGCCGGCGGAAACUACUAG<miR-2796>
+UUCGCGGGCGAAGGCAAAGUC<miR-3124>
+GGGCGAGUUUGCUUCUGGUUCA<miR-279c*>
+UUUAGAAACACAAAGCAUGUGU<miR-2566b*,miR-2566a-1*>
+AAAACUGUAAUUACUUUUGUAC<miR-548g>
+UACUUGUACAAUGUCUUGAAACGU<miR-3370>
+UAUGAUUGAUGUUUAAUGGC<miR-4054-5p>
+UGGUGUGCAGGGGGUGGAAUA<miR2950>
+UGAAACGUUAGAGCAAAAUACU<miR-2041>
+UGUGCUGUAUAUGCACUUCU<miR-4017-5p>
+UACGUAGUAUAGUGCUUUUCAC<miR-471,miR-471-5p>
+CAGCCAAGGGUGAUUUGCCGG<miR169c,miR169k>
+CAGCCAAGGAUGACUUGCCGG<miR169c,miR169b,miR169j,miR169r,miR169h,miR169e,miR169k,miR169w,miR169f,miR169s,miR169g,miR169a,miR169d>
+UUCAAUCCAGACCAGUUUUUCU<miR-1422q>
+CCAAGUUCUGUCAUGCACUGA<miR-2957>
+UAAUGACGAAAUGUCUCA<miR-2178>
+UAGGGUACGCCCCCGCAAGCUU<miR-2267>
+UAUCACAAUUCUAGCCUGGCAA<miR-2567a>
+CAAUUGGAUCGGUCCAACCGGC<miR4354>
+GAGUAUUGUUUCCACUGCCUGG<miR-503*>
+UAAGGCACGCGGUGAAUGCCAAG<miR-124,miR-124b,miR-124a>
+GGGAGCCAGGAAGUAUUGAUGU<miR-505,miR-505*>
+AGCGAGGUUGCCCUUUGUAUAUU<miR-381,miR-381*>
+CUCAAGUUCUCAUUUCCAAUAC<miR-rL1-24-5p>
+CCCCGGCAGGACAAAGUCUCU<miR-2992>
+UUGUAGAGUCAUACACCUCUA<miR1223b,miR1223c>
+UAAUACUGUCAGGUAAUGACGAU<miR-236>
+UGAGGUAGUUAAGAAUAAGUG<miR-84a>
+AGUGCCGGGAGGUGGCAUCAGG<miR-1419a*>
+UCUCGGUUCGCGAUCCACAAG<miR851-5p>
+GUCAGUGGUUUUGUUUCCUUGA<miR-BART15>
+GGAAUGACGUCCGGUCCGAAC<miR166h*>
+UGUCAUGGAGUCGCUCUCUUCA<miR-46>
+CCCGCCUUGCAUCAAGUGAA<miR168b*>
+CAAUCCAUACCAAGAUUUUCUAU<miR-1422b-2*>
+CUGGGCAACAUAGCGAGACCCCGU<miR-1285>
+AACCCGUAGAUCCGAACUUGUG<miR-100,miR-100b>
+AGAGGUGCAGUAGGCAUGACUU<miR-1902>
+UAGCACCAUGGGAUUCAGCU<miR-998>
+CCGUGUUUCCCCCACGCUUU<miR-3676>
+GAGCCCGGAGCCAGGCUGCUGU<miR-1618>
+UCACUGGGAAUGUAAUAGCUAU<miR-2733e>
+UUUCAGUCAGAUGUUUGCUGCA<miR-30d-3p>
+ACUCAAACUAUGGGGGCACUUU<miR-290-5p>
+UAAUACUGUCAUGUAAUGACUUC<miR-236>
+UUUGGUGUUGUGCUGUGCAA<miR-4187-5p>
+UAGUUGUGUGUGCAUGUUUAUGU<miR-669o-5p>
+ACAGUAUUCUGCACAUUGGUUA<miR-199b-3p>
+UCGGGCCAGGCUUCAUCCCCC<miR166d>
+UGCAAGAAUGAGAAGCAAAGC<miR838*>
+UGUUCUUGACGUCUGGACCAC<miR951>
+AAGCGAGGUAUAGAGUUCCUACG<miR-276b*>
+UGGCAAGAAAUGGCAGUCUACA<miR-74>
+AACUUCAAACCGCCACAGGUAACC<miR-2824>
+UAGCUUAUCAGACUGAUGUUGA<miR-21>
+UGAGGUAGUAGUUUGUGCUGUU<let-7i>
+GUGAGUAAAUCUACCUCUUUGA<miR-2584*>
+ACUGUUGCUAAUAUGCAACUCU<miR-367,miR-367*>
+GUAAGUGGUUAUGAUCUGGAC<miR3705>
+UGAGACCAAAUGAGCAGCUGAC<miR3522b>
+UACGAAUUUCAGUCUGAUUGCAA<miR-3302>
+ACUGCCCUAAGUGCUCCUUCU<miR-18a*>
+CUGAGUCCGGUGGGGCAGUGUGU<miR-2466-5p>
+UGGCAGUACCUAAGUCCCUGA<miR-1506>
+CGAUCUUGUAGCAAGAACUGAG<miR1861c>
+ACCAGUGUGGAUUUGUAAAACGU<miR-2567c*>
+UUUUGAUUGUUGCUCAGAAAGCC<miR-315>
+CACCACCAGCCCCACCACGCGGUAG<miR-1905c>
+UGUGGUACGGUGCACCCUGAGA<miR-M14-5p>
+UCAGUCUUUUAGAGAAGAAGUG<miR-3368>
+AGCUUGGGCUAGGAAUUUGUGC<miR2621>
+UAGCACCAUUAGAAAAUGGU<miR-29-3p>
+AUCUAAAGGUGAUUAUUGUGCC<miR2590e,miR2590d,miR2590a,miR2590f,miR2590c,miR2590b>
+UAAGUGCUACUUGUUGGGGUA<miR-430a>
+UAAGUGCUUCCAUGUUUUAGUUG<miR-302d>
+CAGUGCAAUAGUAUUGUCAAAG<miR-301a>
+AAAUGGUGCCCUAGUGACUACA<miR-224*>
+GCAAAGGAUGAAGCUGUGAUG<miR-1693>
+CAGGGAACAAGCAGAGCAUGG<miR408*>
+UCGGUAACGAAGAAUACUUGGA<miR-2158-3p>
+UGAGACAGUGUGUCCUCCCUCG<miR-1994>
+CGACUAUCCGGUGUGAGUAGCG<miR-3408>
+ACGGGUUAGGUUCUUGGGAGC<miR-125*>
+UUGGUGGUGUUUGGAUCUUACAAC<miR-3278>
+UUGCGUAGGCGUUGUGCACAGU<miR-242>
+UUGGGAACAUUUUGCAUCCAU<miR-450b-3p>
+CUGAAGUGAUGAUUCACAUUCAU<miR-3647-5p>
+GACGCCCAAAACUGAAGGUCA<miR3700>
+GGGCUCCUCAGAUGUUCAUG<miR771*>
+UGCAUUUGCACCUGCAUCUUG<miR530b>
+CUCUAGAGGGAAGCACUUUCUC<miR-518f*>
+UGGCAAGACAGGCAGCGGUAG<miR-2225>
+UUAAUGCUAAUCGUGAUAGGGGU<miR-155>
+UAAUGCCCUUGCUGAGAUUCCAU<miR-786>
+UCACAGCUUUUUGUGUUUACA<miR-1008>
+ACAAUAGAGGGAGGAAUCACAG<miR-936>
+UAAACAGCCCCGAUUUGACAGGU<miR-H17>
+CGGCAGAAGCACUUGGGGUAU<miR-55*>
+AAUUGCACUCGUCCCGGCCUGC<miR-92>
+UGGCGCGGAGAGGGCCCACAGUG<miR-675>
+AGCAGGCAUGUCUUCAUUCC<miR-rL1-16-5p>
+UGCUCAAAUACCACUCUCCU<miR1440>
+UUUUGAUUGUUGCUCUGAGAGUU<miR-315>
+UCACUAGUGAAGGCAACUAAC<miR-BART21-5p>
+AAGGGAACUUCUUCUCGCUGA<miR-1409>
+AAGUGCUUCCAUGUUUUAGUGA<miR-302a>
+GUGCCUGUUUCCUGUGGGA<miR-632>
+CGGCCCGUCCGGUGCGCUCGGAU<miR-2190>
+ACGGUAUCUCUCCUACGUAGC<miR391*>
+AAAAAGUUCGUUUGGGGUUU<miR-2284v>
+GUCCUUUCCAACAGGUUUCGC<miR-4000b-1-3p>
+UUGCAUAGUAACAAAAGUGAUC<miR-153>
+ACUCAAAACCCUUCAGUGACUU<miR-616*>
+AUAAGUAGGUUUUAUUCGACUU<miR-2797a>
+UCGGACCAGGCUUCAUUCCCUU<miR166b>
+CCCAGAUAAUAGCACUCUCAA<miR-488*>
+AUUAACGCUGGCGGUUGCGGCAGC<miR404>
+UGCCAAAGGAAAUUUGCCCCG<miR399g,miR399k,miR399f>
+UAUUGCAUUUCCAAUCUGGCAA<miR-2567c>
+CAUAUACAUACACACAAACAUAU<miR-669b*>
+AGAAUUGUGGCUGGACAUCUGU<miR-219-3p,miR-219-2-3p,miR-219*>
+UAAUUUUAUGUAUAAGCUAGU<miR-590-3p,miR-590>
+UAUUUUUAAAACAGCAAUUA<miR-4177-5p>
+CUUGGCACUGGCGGAAUUAUCA<miR-96>
+UGGGUUACGGGGCUUAGUCC<miR-61*>
+UGCAUGACCGUCUCUUCCUGC<miR1211>
+AAUCGUUGAGGCUGAAGUCGU<miR163.2>
+CAUGGGAUAAUCGGAACAAGGC<miR-2973>
+CCCUUCAUUCCACCGGAAUCUG<miR-205,miR-205b>
+AAGUCAUCAAAAUAAAAGUUG<miR821e>
+GUACAUCUCGCAUUGUGACCAU<miR-1995>
+AUAUACAUACACACACCUAUAU<miR-467e*>
+GUGAAGUGUUUGGAGGAACUC<miR395l,miR395k,miR395m,miR395c>
+AAACCGUUACCAUUACUGAGUU<miR-451>
+CAGGUCAUAUAAGUGUGGAGUU<miR-2431*>
+AGCGGUCUGUUCAGGUGGAUGA<miR-US25-2-5p>
+UCUCUCCGUUGUAAAAUCAAA<miR859>
+GAUCAUGCAUGACAGCCUCAUU<miR167a*>
+ACAUAGCCUGACAGAGGUUAGG<miR-282*>
+AGGCAGUGUUGUUAGCUGGC<miR-449b>
+UCAGGAAGUUCCGUGCCCGAA<miR-M14-3p>
+UGGCACAAUACUUGCAUGUAG<miR-784*>
+CAACAACGAUUUUUGGGUCGUU<miR3436*>
+GUUGGUUAGUUGUGCAUUUUC<miR-277d-5p>
+UGCCAAAGGAGAGCUGCCCUG<miR399d,miR399b,miR399i,miR399o>
+ACCAUCUGAUUUGGACACGCA<miR-1593>
+GCUGGGAAGGCAAAGGGACGU<miR-204*>
+UUGGGACAUACUUAUACUAAA<miR-1302>
+AAAAUCUGAGUGAACUUUUUGG<miR-2285b>
+UAGUGUUGUCCCCCCGAGUGGC<miR-K12-10a>
+UGAUAUGUUUGUUAUUUGGUUGGU<miR-190>
+GAAGCUCUGUUCUACAGGUAU<miR-993>
+CUCACAGUCUGCAUGGCUCUC<miR533e>
+AAGUGUGCAGGGCACUGGU<miR-648>
+UUAUUGUAACUAAUUUGUCGGU<miR4411>
+GGCAGUCUUCUUGGCUAUC<miR169m*>
+UGUUCUUCCCGUGCAGAAGCAG<miR-3568>
+UCGUGGCCUGGUCCCCACUAU<miR-1204>
+ACCACUGGUGCGAUCCUGCC<miR-2206-3p>
+GUUCGGUGAUGAAACCAUGGA<miR-3538>
+CGAAAACUGCAAUAACCUUUGC<miR-570>
+UCCCUGAGGAGCCCUUUGAGCCUGA<miR-351>
+GUGUCUGCUUCCUGUGGGA<miR-632>
+AGCACCUUCGGAACUGUCCUCA<miR-1736>
+UCUUUGGUGAUUUUAGCUGUAUGC<miR-9b>
+UAUUGCACUUGUCCCGGCCUG<miR-92,miR-92a>
+UGGGUAAACUCCCAAGGAUCAGG<miR-1001>
+AUUCUUUUCUGCUGUGUUACU<miR-1786>
+GUGAGGACUGGGGAGGUGGAG<miR-1224>
+GGGCUUCUCUUUCUUGGCAGG<miR399e*>
+UUACAGUGCCCAUUGAUUAAG<miR475b,miR475a>
+GGCGACGGAGGCGCGACCCCCC<miR-2892>
+AGAAGAGAGAGAGCACAGCCC<miR529d>
+UGGUUUUUUUGGAGCAUGAGG<miR1857-5p>
+AAGCUUGGAUUGUGAUCUCA<miR-753c>
+CUUGGAUUGAAGGGAGCUCCC<miR159,miR159c>
+UUUGGCACUGGCACAAUUUUGC<miR-96>
+UUUACAGUGUAAAUCGUUCGUGA<miR-3401>
+UCUCCUCUCGAUCCUGGCACU<miR-1355*>
+AUGUGACCUUGUAUAUGAUC<miR2658>
+CAGUGUUCAGAGAUGGA<miR-4255>
+UGCCGCGAAGUGUACGACCUCC<miR-1421i-2*,miR-1421i-3*>
+UCGGACCAGGCAUCAUUCCUU<miR166m>
+UCCAAUGUAAUCUAGGUCUA<miR2088a*>
+UGACAAGGAAGCAGAGCGGAU<miR1160.2>
+AAGGAGCUCACAGUCUAUUGAG<miR-28,miR-28-5p>
+CACCCGUACAUUUGUUUCCGUGCU<miR-53>
+GUCACAAUCUAUGGGGUCGUAGA<miR-BART8*>
+CUAUACAACUUACUACUUUCC<miR-98*>
+UGACAUCUAGGUGGUCAUGGUU<miR-3280>
+GUGGAUUAGGCUUUGGCUU<miR-1261>
+AGAGAUACCUCUGGAGAAGCG<miR-967>
+AACCCGAUUGUGUCUAGUGUUC<miR-2266>
+CCUCUCUCCACCACCUAAAUGA<miR-1406*>
+CCCGGAGCCAGGAUGCAGCUC<miR-1203>
+UCUCAUUAUUCAAGUUUUUCUUA<miR-71c*>
+AAUGUUUUUUCCUGUUUCC<miR-4307>
+UUUUGGAACGGAGUGAGUAUU<miR1439>
+UAUUAUGCUCAUUUCUUUGGAU<miR-2763>
+CGAGGCUCCCCACCACA<miR-1188-3p>
+UGAUUGAUACGUCUGUGGGUAGA<miR-509>
+AGUGUUCACAGCGGUCCUUGAU<miR-124*>
+GGGAUGGUAGACCGGUGACGUGC<miR-1193>
+AGCUGAUCAUAUAAGUUU<miR-4001e-3p>
+AAGGCAGGGCCCCCGCUCCCC<miR-940>
+CAGGGCUUGGAUUGUGAUCUC<miR-753d-5p>
+ACCUCCAUAGUACCUGCAGCGU<miR-1930>
+AACACACCUGGUUAACCUUUUU<miR-329a>
+AGGAGGACAUAUGUGGUGUGGU<miR-1421aj>
+CACCACACGAUCCACUAGGUCU<miR-rL1-4-3p>
+AACAUUCAACGCUGUCGGUGAGUU<miR-181a>
+AAACCGUUACCAUUACUGUGUU<miR-451>
+UUGAUGUCCACUGUGACCAUAG<miR-3073-3p>
+CCACAGCUUUAGGCGGCCUGCU<miR-196-3p>
+CAGGAUUUUAUACAUGUAAAGAAU<miR2878-3p>
+CCAGUUCUGCGUUCAUGUCCC<miR2086*>
+GAGCCAAGAAUGACUUGCCGA<miR169>
+UAUUUGGUAUCGCUUUGGUCCC<miR2601>
+ACUCUACAACCUUAGGACUUGC<miR-676*>
+AACCAGUACCUUUCUGAGAAGA<miR-470*>
+UUUGGGAGUCUGCGGUUGGGAG<miR-H3>
+CUGGGUAUUUUAGAUCAUCGGC<miR-1174>
+CAGAAGAAAGAGAGCACGCAU<miR1088-5p>
+UGAUUGAGCCGUGCCAAUAUC<miR171i,miR171j,miR171d,miR171e,miR171g,miR171k,miR171h,miR171,miR171f,miR171c,miR171a,miR171b>
+GAGCACAGUUUGGUCAUGGAGC<miR-1695>
+UUCUGGAAUUCUGUGUGAGGGA<miR-1299>
+GUGCAUUGUAGUUGCAUUGCAC<miR-33>
+UGUAAAAUUCAUUCGUUCCAA<miR1320-3p>
+GGCAGUCUCCUUGGCUAUC<miR169l*,miR169j*,miR169k*>
+ACCAUCGACCGUUGAUUGUACC<miR-181a*,miR-181a-1*>
+UGGAUAAAGAACAAUUCUUAAA<miR-2790*>
+CACAAGAUACUGGUAUUACCU<miR-624>
+CUUCCUAUGCACAUCUGUCCUU<miR-2068>
+CAAGUUACUUGUUGGGAUUAUG<miR-216c>
+UCGGUGGGACUUUCGUUCGUCU<miR-278>
+UUGGACUGAAGGGAGCUCCCU<miR319f,miR319b,miR319c,miR319,miR319a>
+GAUGAGGAUAGGGAGGAGGAG<miR854a,miR854b,miR854e,miR854d,miR854c>
+UGAUCUCUUCGUACUCUUCUUG<miR831>
+UGGGGUUGGGGCAGUGUGGCUGU<miR-2324>
+AACGUAUGUCGAGCAAACAU<miR-4010-5p>
+UACCUUUAACUCACUGUGUACGG<miR-3253>
+UGUCAUGGAGCUGCUCUCUUUAU<miR-281>
+UCGGUGGGGUUUUCGUUCGAGU<miR-278>
+CUCUAGAGGGAAGCACUUUCUG<miR-520c-5p,miR-526a,miR-518d-5p>
+UCGUACCGUGAGUAAUAAUGCGC<miR-126>
+UGCAGGAACUUGUGAGUCUCC<miR-873>
+GUUGGAAGCCUUCGUGGGAGA<miR477g-3p>
+ACCAAAAGAAUAGCUAUGUGGU<miR1079-3p>
+GCUUUAACAUGGGGUUACCUGC<miR-302c*>
+CAUGUGCCCUUCUUCUCCAUC<miR164h*,miR164c*>
+CCGGCUGUGGAGAAGGAG<miR-2993>
+GCACUGGAAGGUUUGGUUUAGCU<miR-750-5p>
+AAGCCAAGGAUGACUUGCCUA<miR169f>
+GGAAUGUCGUCUGGCGCGAGA<miR166i*>
+AACUGCUUUUUGCACUACCACG<miR-34*>
+CUCCCACAUGCAGGGUUUGCA<miR-188-3p>
+UCGGAUCCGUCUGAGCUUGGCU<miR-127,miR-127-3p>
+AUUGGAGUGAAGGGAGCUCCA<miR159b>
+UUGAGCCGCGCCAAUAUCAC<miR171d,miR171a>
+GCUGGGAAGGCAAAGGGACGUU<miR-204*>
+UAGCAGCGGGAACAGUACUGCAG<miR-503>
+AAAAGUGCUUAUAGUGCAGGUAGA<miR-106>
+CAGUUUUUGAUGAAUUACUUAA<miR-2157*>
+UACCCCGCCAACCGGACAGGA<miR-1362>
+AGGGGCCUCUGCCUCUAUCCAGGAUU<miR-665*>
+CAUCAAUAUGAAUAUGGGAAAUGG<miR446>
+UAUCACAGCCAGCUUUGUAUGAGCA<miR-2b>
+CUUGGAUUGAAGGGAGCUCCU<miR159b,miR159d,miR159c>
+GUGUGCGGAAAUGCUUCUGCUA<miR-147b,miR-147>
+GAGGAACUAGCCUUCUCUCAGC<miR-298*>
+UCAAAAUCAGAGAAUCAACCA<miR3434>
+AAGGAACGUUAAAAACCAUUGU<miR-3051>
+UGGUGAGUCGUAUACAUACUG<miR3521>
+GCGUGCGUGGAGCCAAGCAUG<miR160d*>
+UAAGUUGUGUAAAUUCAAAC<miR-4023-3p>
+CAAAGAAUUCUCCUUUUGGGCU<miR-186>
+GUUUACUGACGAAAGGACGCAU<miR-3485-3p>
+AAGUGUGCAGGGCACUGAU<miR-648>
+CAGCCCCACAGCCUCAGA<miR-4323>
+AAGUUCUGUUAUACACUCAGGC<miR-148b*>
+AUCCGGCCUGGGAGCACUCUCU<miR-1420g>
+AACGCGUGAUAUGUUAACAUCGGU<miR4359b>
+UCAGGUACUUAGUGACUCUCAA<miR-306>
+UCCACAGGCUUUCUUGAACUG<miR396,miR396d,miR396e>
+AUCAGUUCCUAAUGCAUUGCCU<miR-217*>
+UCCACAUUCGGUCAAUGUUC<miR1444a>
+UGCCUACUGAGCUGAUAUCAGU<miR-24-1*>
+CCUUGUUACCUACGGUACC<miR-126*>
+UUCCUGACGAACCACGGAAA<miR-2805>
+ACAAAGCUGUAGCGUUAUUC<miR2099-3p>
+UUGAACUGUUAAGAACCACUGG<miR-3545-3p>
+AUAUCUAAUUGAUUGUUGG<miR-4107-5p>
+GGGGUUCCUGGUGAUGCGAUUU<miR-23a*>
+AACACUAUCCUGAUGCUGUCA<miR-338-5p>
+UUUGGCACUCCGCAGAUAAGGCA<miR-791>
+UGAACCAGAAUGAUGGAAGGACAG<miR-3334>
+UGAGUCAAGGAUGACUUGCCG<miR169u,miR169r>
+UCCUUCCGUUCGGAAUUAC<miR1127>
+AGCUCCCGUCUCCUCUGUGCUGA<miR-2388*>
+GUAAGACAUUAACAUUGUUGAA<miR-2578>
+UCCGUUAAUAAAGGCAUC<miR-4129-3p>
+UAAGAUAAAGCCGUGAAUUUG<miR1428a-3p>
+UAUGGCUUUUCAUUCCUAUGUG<miR-135b>
+UGUCCUCUAGGGCCUGCAGUCU<miR-3909>
+UCUAGGCAACAAAGUGAGACCU<miR-1285a>
+UUUGCGAGUUGGCCCGCUUGC<miR1431>
+UGUCAUGGAUAUGCUCUUC<miR-281-3p>
+UCGCUUGGGCAGAUCGGGAC<miR168b>
+CUUCACUUACACUGCUCACUGGU<miR-1550-3p>
+UAAAAUAUAUUUGAAAUCGGGCC<miR-2446>
+UGAGGUAGGAGGUUGUAUAGU<let-7e>
+AAUGCACCCGGGCAAGGAUUCU<miR-501,miR-501-3p>
+CAACAAAUCACAGUCUGCCAUA<miR-7-1*,miR-7a-1*>
+CUCCUCUGCCGUGCUGGUUGUG<miR-1564*>
+UCCACGGACAUCCAUUUUUGUGA<miR-3033>
+AAGGAGCUUACAAUCUAGCUGGG<miR-708-5p,miR-708>
+AGUGGUUGGUUUGGUGCUGUC<miR-1603>
+UUUGUUCGUUCGGCUCGCGCGA<miR-375>
+AAGAAAGCGAAGUCCAUCCUCAU<miR-2322>
+AAAAUAUCGGUGUUGGGUAAA<miR-2024g*>
+UUCCCGAUGCCUCCUAUUCCUA<miR2118c,miR2118q>
+AGUCAGGCUGCUGGCUAUACACCA<miR-344d-1*>
+CGCUAUCCAUCCUGAGUUUCA<miR390a*>
+ACAUUCGAGAACCGUAAGACAA<miR-2856>
+CUGGGGCAAGUGGAGUACGUU<miR-2385-5p>
+UGCCUACUGAGCUGAUAUCA<miR-24*>
+UGUCGUAUGCGUGAUGACACGUUC<miR-489*>
+UGGAGCUCUUGAGGCCUGGCAU<miR-2460>
+AAUUGCAUUGAUUGGUAUUGGC<miR-2255>
+UAGUACUGUGCAUAUCAUCUAU<miR-1278>
+UAUGUGGGAUGGUAAACCGCUU<miR-299,miR-299-3p>
+UAAGUUGUAAUAUGUUGUGU<miR-4114-5p>
+UCGCACAGGAGCAAGUUACCGC<miR-1451>
+AAAUUCUGUUGCAGCAGAUAGC<miR-BHRF1-2*>
+AACACACCUGGUUAACCUCUUU<miR-329,miR-329b>
+GUGAACGGGCGCCAUCCCGAGG<miR-887>
+CUGACCUAUGAAUUGACAGCC<miR-192>
+CAAGCUCGCUUCUAUGGGUCU<miR-99a*,miR-99*>
+CAUUCAACUAGUGAUUGU<miR-4272>
+UUUGUACUAGGCUAAGGAAUU<miR-239>
+ACAUACUGAAGUUUGAUGCCA<miR1067>
+GAUGGGUUAUCUCAAAGUGGACUU<miR1053-5p>
+GUGGGUGGAAUAGUAUAACAAU<miR-2985>
+AGAGCUCACAGCUGUCCUUCUCUA<miR-3670>
+AUUCCUGAAGAGAGGCAGAAAA<miR-691>
+UGUGAAUUGAGACUGUGUAUAAG<miR-2207>
+CAUCAUAGUCCAGUGUCCAGGG<miR-BART7>
+UUCUCAAGGAGGUGUCGUUUAU<miR-513c>
+GGGGGUCCCCGGAGCUCGG<miR-615>
+UGACUGGCACCAUACUGGAUAA<miR-871*>
+CUUUUUGCGGUCUGGGCUUGCU<miR-129,miR-129-5p>
+UCAAAUGCUCAGACUCCUUGGU<miR-105b>
+UGUAAACAUCCUUGACUGGAAGCU<miR-30a-5p,miR-30e-5p>
+UUAAAGGAAACAAUUAAUCGUUA<miR1529>
+ACUCAAAAAAUGGCGGCACUUU<miR-371>
+UAGUGAGUUAGAGAUGCAGAGCC<miR-3174>
+UAAAAGUCUUCAUUAUAAACGCU<miR-3427>
+UUUGGUUAGUGUGCUGAAUAU<miR2636>
+CACAUGGCACUCAACUCUGCAG<miR-3082-3p>
+AGGAGCUGCGGGACAAGAUUCUU<miR-492>
+AUCCUUCGUCCCUGGGUGAGA<miR-501-5p>
+UCUGGUCCCCUGCUUCGUCCUCU<miR-1934>
+GUUAGGGCCAACAUCUCUUGG<miR-2909>
+UGAUUGGUACGUCUGUGGAUAGA<miR-509a>
+ACUGAUGUGAAGGUGGUUUGGC<miR-2346>
+CCCGAAGAGCCCUCACAGAGCC<miR-m59-2>
+AAUUGCACGGUAUCCAUCUGUAA<miR-363>
+CGGCACAUGUUGGAGUACAC<miR-305*>
+UCCUGGUAGAUCUUCAGUUGGUC<miR3465>
+ACACUCUCUCCAUUUCUCUGC<miR1023b-5p>
+ACGCCACAUUUCCCACGCCGCG<miR-2182>
+UACAGUAUAGAUGAUGUACUGG<miR-144>
+UGUCACUCGGCUCGGCCCACUACC<miR-668>
+UUCCAAGCUCCGACGGGAUGG<miR3454f,miR3454d>
+AGAGCGCAGGGGAGGUGCUUAG<miR-2777*>
+GGUGGCUCAUUCUCGGCUUGUGUC<miR-1480>
+UGUAUUGAAAUAGCUUGACGUG<miR-3203*>
+ACUUACUCCCGGGAGUUCUC<miR-1502d-3p>
+AUCCCGGACGAGCCCCCA<miR-1937b>
+UUAGUGCGCGGUAAGCUAGGGUG<miR-1552-5p>
+CUGGUUUCUGUGAGCUGCUU<miR-15-3p>
+GAAUGUAGUGAAUUUGUUCCA<miR417>
+CAGGUCACGUCUCUGCAGUUACAC<miR-370*>
+GGAGAAGCACGGUGUAGGGUGGG<miR-2486>
+CCUAGGGGGAGGUCUGUUGU<miR-3527>
+UCAAUCCAGAGCAGAAUUUUCU<miR-1422j*>
+UGCUCAGUAGUUGGUGUAGGA<miR-222b*>
+CUUUCGAGCAGUAAUCAAAGUC<miR-315*>
+CAGCUUGAAUUUGUUGCCUA<miR-4050-3p>
+CAGACCAUUCUGGGCUGCCUCA<miR-15c*>
+CCAAGGUCAUCGGUUCGAUCC<miR916>
+UAAACUCCUCGUACUCUUCUUG<miR831>
+UGCAUCGUGUGUGACCUCCCUA<miR-1421x*>
+UAUUGCACUUGUCCAAGCCUGU<miR-92c>
+GGGUUGAUAUGAGGACACAUG<miR398b*>
+AGCGAGGUAUAGAGUUCCUA<miR-276-5p>
+GUGAGCAAAGUUUAAGACAUUC<miR-87d>
+UUCCUAUACCACCCAUUCCCUA<miR3633a*>
+AACUCGUUCUGCUGGUUGUUAUG<miR-67*>
+UCGGCAACAAGAAACUGCCUGA<miR-196a*,miR-196a-2*>
+GAAACAUUCACUCGGGUUUUU<miR-2284t*>
+CGUCAAACUCCGUUCAGUUGGUG<miR-309b*>
+CAGACCCCCUCUCCCCCUCUUU<miR-M1-2-3p>
+CUCUUCAAUCUCAGGACUCGCA<miR-676-5p>
+UUCAAAGCAUCUUUGAAGGAA<miR3441.1>
+ACUUUGAAUCUUUGAUUUGAA<miR829*>
+UUUGAUCACCAGUAACUGAGAU<miR-961>
+UAUUAUGCUGUUAUUCAUGA<miR-1993>
+UCUAUGACGUCAUUACUACG<miR-4026-3p>
+UGGCAAGUCUCCUCGGCUACC<miR1433>
+AUGACACGAUCACUCCCGUUGA<miR-425-5p>
+GUCAUGGACUUGCUCUCUUUG<miR-281>
+AGUGGAGAGAGUUUUAUCUCAU<miR-1175*>
+UCCUCAGGGCAGGAAGUGCGCAG<miR-2453>
+CCUCAUUAAAUGUUUGUUGAAUGA<miR-421>
+UUGCUGCUCCAAUUGUCUGGACACG<miR-3378*>
+GAAUGUUGUCUGGAUCGAGG<miR165a*>
+UUGAAUUGAAGUGCUUGAAUU<miR846>
+UAAAGCUUUAGUACCAGAGGUC<miR-9*,miR-9c-3p>
+UACUGAAUGUCUUUUUGCAAAUUGA<miR-2175>
+UUAGUCAAAGAUUUUCCCCAUAG<miR-1012,miR-1012*>
+CGGGACCGGGGUCCGGUGCG<miR-2887>
+AACUAUGCAACCUACUACCU<miR-3596b>
+AGUCAUCACACUCUCAGUUGAUA<miR-2733a*>
+UAUGUAAUAUGGUCCACGUCU<miR-380>
+GCGACGAGCCCCUCGCACAAACC<miR-375*>
+UGGUGGUAGAUUCAGCGAAACA<miR-2808c>
+UCUUGCCCACCCCUCCCAUUCC<miR482b>
+UGAGGAUUAAUGACUGUCUGGG<miR-1641>
+CUCGUGGGCUCUGGCCACGGCC<miR-3677>
+GUGAGUGGGAGUCCCAGAGUUAC<miR-2546*>
+UAGCUUAUCAGACUGGUGUUGGC<miR-21>
+AUGCGAGAGCCGUGCUUAGUA<miR3628*>
+AAUCGUUUGAAUGCUCGUCUAA<miR-2780a*>
+GGCUGGCAACAGCUCUUACCU<miR-621>
+UGGUGCAACAGGCCAGUGGUU<miR1164>
+UAUCACAGCCAGCUUUGAUGAGU<miR-2c>
+GGUGAAUUGCAGUACUCCAACA<miR-3068*>
+CAGGCUCAUCAGAUGAAAGUC<miR-3079-3p>
+UCUACAGUGCACGUGUCUCCAGU<miR-139>
+UUUCCUCUGGUCCUUCUCU<miR-185*>
+UCAGCUGAGGUUCCCCUCUGUC<miR-1190>
+AGUUCCAGUGUGCUAUGAUGUA<miR-2a-1*>
+UUUGUGACCUGGUCCACUA<miR-758>
+UCUUUCUGCAAACGCCUUGGA<miR2934>
+UAGCCAAGAAUGACUUGCCUA<miR169o,miR169i,miR169n>
+UAUGACUAACAGAGCGCACGAGG<miR-63g>
+CGUGGUGUUUAGUCGUAGUGC<miR-2941-1*>
+CAAUACGAAUAAUGUUAAUGCCU<miR-3323>
+AGAAUAUUGGUGCUGGGCAAAA<miR-2024c*,miR-2024d>
+AGCUACAUCUGAUUACUGGGUCA<miR-222b>
+UAUUGCACACUUCCCGCCCUUU<miR-310,miR-310a>
+UUGCAAGAAGGACUCAGCCAGCGAG<miR-3344>
+GAGACUGGUGAGUUCCCGGGAA<miR-873*>
+CAUAUACUCCCUCCGUCCGAAA<miR1133>
+UGGCAGUGUAGGAAAUAUCUU<miR-2239>
+UAGGAACUUCAUACCGUGCUCU<miR-276,miR-276-3p,miR-276a,miR-276*>
+UCCCUGUCCUCCAGGAGCUC<miR-339b>
+AAGCCAAGGAUGAAUUGCCGG<miR169v>
+UUAAUUAGUAUAGCCUGUUUUA<miR-2187*>
+UUUUGCAAUAUGUUCCUGAAUA<miR-450b-5p>
+GACCUGAUGCUGCUGGUGUGCU<miR-BART4>
+GGAUUGGGGGCCGAUGGAAAGG<miR3632*>
+UUCGAUGCUUGUAUGCUACUCC<miR-1559>
+UCCGUGAGACCUGGUCUCAUAGA<miR1123>
+AGCUCGGUCUGAGGCCCCUCAGU<miR-423-3p,miR-423>
+UAUCACAGCCAGCUUUGAUGAGCU<miR-2b>
+CUAUACAGCCCGCUAGCUU<let-7d*>
+CUUCCGCCCCGCCGGGCGUCG<miR-718>
+UGGCAGGGAGGCUGGGAGGGG<miR-1207-5p>
+GUGACAUCACAUAUAUGGCGAC<miR-489>
+UCCCUGAGAUCAUAAUAUGCCU<miR-125b>
+CUGUUGAUUCUCUUUUCUUGGUU<miR-4162-5p>
+CUGAAGUGUUUGGGGGAACUC<miR395l,miR395f,miR395j,miR395a,miR395i,miR395k,miR395h,miR395d,miR395m,miR395c,miR395b,miR395g,miR395,miR395e>
+UGGAAGACUAGUGAUUUUGUUG<miR-7>
+CUGGGCGGAUGGGAAGGGCUGG<miR-2407>
+CCCGCCCGACCGCCUCGCCCAA<miR-2436-3p>
+CCUCUGGGCCCUUCCUCCAGC<miR-326>
+UCACACCCAGGUUGAGUGAGUC<miR-307-as>
+UAUGCGUAAGACGGAUUCGUA<miR1856>
+CACAUUCAUUGCUGUCGGUGGG<miR-181c>
+UAGGAACUUCAUACCGUGCUC<miR-276>
+AUACCCUGUAGAACCGAAUUUGU<miR-10b>
+AAAGUAGCUGUACCAUUUGC<miR-562>
+UUGGCCCAAAAGUUCGUUCGGAU<miR-2284r>
+AAAUCUCUGCAGGCAAGUGUG<miR-216b>
+CCGGAAGAGGAAAAUUAAGCAA<miR1526>
+GAGCCAAGGAUGACUUGCCGG<miR169p,miR169m,miR169q,miR169n>
+CAGUGCAAUUAAAAGGGGGAA<miR-721>
+CAAAUGUUCCAAUGGUCGGGCA<miR-985>
+AGAGGUAGUGGGUUGCAUAGU<let-7d>
+UGAGGAGCUCUGCAAGCAUGCA<miR-1597>
+UCUGCUCAUACUCCAUGGUUCCU<miR-767-3p>
+UAAUACUGUCUGGUAAUGCCG<miR-429>
+ACAAUGGUAGUACGGCCAUUU<miR911>
+UUAAGACUUGCAGUGAUGUUUAG<miR-499>
+GAAAUCAAGCUUGGGUGAGACCU<miR-551b*>
+AACUGGGAUUGCUUGGCC<miR-1342>
+UAAUACUGCCUGGUAAUGAUG<miR-200b>
+UUUUGUUUGCUUGGGACUGCAG<miR-rL1-29>
+GUAUGUGUUUGGUGAAAAGA<miR-4025-5p>
+GUUAUUUUGCAUAUCCUGCA<miR-2778a-4*>
+UCAAGUACUGCGCGCAAGGACCG<miR-M20>
+UGAGCCAAGGAUGACUUGCCG<miR169c,miR169e,miR169f,miR169g,miR169d,miR169n>
+AGGGCCCCCCCUCAAUCCUGU<miR-296-5p,miR-296*>
+CCGGUUUUCGUUGAGAUCUUA<bantam-b*>
+ACCAUGUUUAGACUCUGAAUU<miR3442*>
+UGAUUGUCCAAACGCAAGCUCAG<miR-219>
+UGGAAAAAACUGGUGUGUGCUU<miR-3148>
+GGGCAAGAUCACCAUUGGCAGA<miR399f*>
+ACAUGCUUCUUUAUAUCCUCAUA<miR-206*>
+AGUUGGACAGGGGAUCUUGACA<miR-750*>
+CAGCGAGCCAGCGGAGACCGGCAG<miR1129>
+GUUGCUUGGGGGUAUUAU<miR-754d>
+AUAGUUCAAGAAAGUCCUUGGAAA<miR396f-3p>
+CCCAGUGUUCAGACUACGUGUUC<miR-199b>
+UACGAUUCUCCGGGUUUAGCAG<miR-rL1-26>
+UGGAAUGUAAAGAAGUAUGUAU<miR-1,miR-1a>
+CGGGAGAUGACUACUGGAAGC<miR3625>
+UUGUGAUGUCAUAUUAUAUAUU<miR-4151-3p>
+UCUUCCCAAGCCCGCCCAUUCC<miR482>
+GACAGCUCGCUCAGCUGGCU<miR-4127-5p>
+AAGUGGUCACUUGAGUUGCAGU<miR-1421l>
+AGAAUCUUGAUGAUGCUGCAU<miR172a,miR172b,miR172c,miR172f,miR172d>
+UUCGUUGUCAACGAAACCUGCA<miR-981>
+UACGAGCCACUGGAAACUGAA<miR841b>
+UGGCAAGAUGUAGGCAGUUCAGU<miR-73>
+UCAAAUGCUCAGACUCCUGU<miR-105a,miR-105,miR-105-1>
+GCGCAGGGAUGUCGGGCGCGCC<miR-H1>
+CGGUGGAAUCUGAGGAUAGUG<miR3455>
+ACACUCUCUCCAUUUCUCUAC<miR1023a-5p>
+UACUGCAUUAGGAACUGAUUGG<miR-217>
+CACAGCGCGUACAAUGUGGAU<miR-460*>
+CAGCAGCACACUGUGGUUUGUA<miR-497>
+AGAGGCAUAGAGCAUGGGAAAA<miR-202>
+CGGGCGAGGGUGUGGGUGUGGCG<miR-2783>
+UGGAGAAGCAGGGCACGUGCG<miR164c>
+CUGCCCUGGCCCGAGGGACCGA<miR-874>
+UAUUAUGCUGAUAUUCACGAGA<miR-1993>
+ACGGCAAAGUGAAAAGGUCUCC<miR-316>
+AGGUGGGCAUACUGUCAACU<miR394b>
+ACCUGUGACGGGCCGAGAAUGGAA<miR1883b,miR1883a>
+UCGCGUGUUAGACAAGCUGCGCCAUGCU<miR-3406*>
+CUUCGUCCGGUGUUCGAGGCG<miR-M27-5p>
+ACAAGUCAGGCUCUUGGGACCU<miR-125b*,miR-125-1*>
+GUGAGUGUUAUACAGUCAUUUUGGGGU<miR-2555*>
+CGGCUGGUACAAGAGCACGA<miR-92a*>
+UAGCACCAUUUGAAAUCGAUUA<miR-29d>
+GCAAACUUCCUCGGGUCGUUG<miR-2568a>
+UUUCAAAAAUAACCUUUUGUUC<miR2122>
+UUACCCUGUUACAUUGUAGAAUGC<miR-1991>
+UACAGUGAUCACGUUACGAUGG<miR-1329>
+AGUGGUUCUUAACAGUUCAAC<miR-203*>
+CACUCCUCCCCUCCCGUCUUGU<miR-483>
+GUCCUUAGGAUGCAGAUUACC<miR2111*>
+CUGCGCUUAGAUGAAGACACUA<miR-3000>
+CCAGUGGAGAUGCUGUUACCUU<miR-194>
+CUUUGGUGAUUCAGCUUAAAUG<miR-79*>
+AAUAGCAACGCCCUUUCGAUUAGU<miR-2520>
+AGAGGUUUUCUGGGUCUCUGUU<miR-329*>
+AAGUAACUACAUAUGAUCGAGA<miR-2523>
+CCUGCUGGUCAGGAGUGGAUACUG<miR-3692*>
+GGGAGACAAAACUAGCUGAGGA<miR-2300b-3p>
+AGAGCUUAGCUGAUUGGUGAACAG<miR-27b*>
+AGGAUUAGAGGCAACUGAACC<miR2275b-5p>
+UCGAUGAUGGUCCCUGUGUUUU<miR-2320*>
+AAAAGCUGGGUUGAGAGGGU<miR-320c>
+GACGGUGAGACUUCUGCAAAGC<miR-2691*>
+UCCUUCUUGUAUAAGCACUGUGCUAAA<miR-1248>
+UAGGUAGUUUCAAGUUGUUGGG<miR-196b>
+UCACCGGGUGAACAUUGGUGC<miR-35a>
+CGCUGUAUGAUUGUCCGAGGUA<miR-2860>
+CAGAGUACGCAAAAAAACAAUU<miR-2778a>
+UUAGGGCAAAGUGCGAGCACUG<miR-H13>
+UGGGAAAAUAUUAAAUGGA<miR-4166-5p>
+CGAGCUGCCCGGGGAUAGACUCU<miR-1822>
+UGAGGAUAUGGCAGGGAAGGGGA<miR-3679-5p>
+GCAGCAUUCAUGUCCC<miR-4310>
+UAUGUGUGUGUGUAUGUCCAUG<miR-466b>
+UGAGAAUCUUGAUGAUGCUGCAU<miR172d,miR172>
+UGAUUGUCCAAACGCAAUUCU<miR-219-5p,miR-219>
+UAUCACAGCCCGCUUUGUUGACU<miR-2a>
+GGGCGCCUCUCCAUUGGCAGG<miR399b*>
+UGAGAUUGUCUAGUGUCUUAAGAA<miR-3292>
+UUUGUAAUUAAAUUUAUGAUUUU<miR-3290>
+UUGAGCCGCGCCAAUAUCACA<miR171b>
+CAGAGAAUUGUUUAAUC<miR-3123>
+ACGUUGGCUCUGGUGGUG<miR-1306>
+UCUUUGGUACUUUAGCUGUAG<miR-9b>
+UGUGCAAAGCCCAAUCAUGUCU<miR-4036-5p>
+UUUUUCGGCAACAUGAUUUCU<miR3950>
+UGAAAGACACGGGUAGUGAGAU<miR-71a>
+GGGGUGAAACUGUACGUUAUAUG<miR-965>
+GGUCCUUGAGUUCUGAGCAC<miR-4075-5p>
+CCUUGUGACAGCCCAUGGGA<miR-2035*>
+UAGGUAGUCGCUCUGGGUUACU<miR-2687>
+AGAGUUGAGUCUGGACGUCCCG<miR-219-1-3p>
+AUAAGACGAGCAAAAAGCUUGU<miR-208,miR-208a-3p,miR-208a>
+UGAACGGCCCUUGUUGUGA<miR-3585-3p>
+UCAUUCAGCGGGCAAUGUAGACUGU<miR-H14>
+CAGGCAGUGUAGUUAGCUGAUUG<miR-34b>
+AUAUAUACUGUAUACUGUGUCA<miR-1812>
+UGAGAUCGUUCAGUACGGCAAU<miR-58,miR-58b>
+UGACAUGGGACUGCCUAAGCUA<miR848>
+UGCAGUCCAUGGGCAUAUACAC<miR-455-3p>
+UCGGUUUCUAGUAAAACUUGC<miR1070>
+UGGAGACGCGGCCCUGUUGGAG<miR-139-3p>
+GUGCAGCACAGUACAGUACAG<miR-3250>
+AACAGGUUAUAUAUGGUGCAGU<miR-1421ae>
+AGGUCUAUUGAUGCUGAGAUU<miR-3486-3p>
+UGCCCUACUCUUCGCAUCUCA<miR-58*>
+CAAAGUGCUUCCUUUUAGAGUG<miR-519d>
+ACCGUCUCCUUUUGGUGCAG<miR-29-5p>
+CUGGUUUCAUAUGGUGGUUUAG<miR-29b*>
+UACGCAAUCCCUAGGUUACCAU<miR-2029>
+CCCCUCAGGCCACCAGAGCCCGG<miR-760-5p>
+GAAUGUUGCUCGGUGAACCCCU<miR-409,miR-409-3p>
+UCUCAGGAGGACAUCGCCACU<miR919.2>
+GGAGGACAGCAGACUCAGGUC<miR-3569>
+AAGCGAUCUUCUAGAUGGUUGUA<miR-1829b>
+UAUAGCAAUGGUGUUUUUGUC<miR1099>
+UACCAACCUUUCAUCGUUCCC<miR839>
+UUGGUGUUACUUCUUACAGUGA<miR-971>
+UCUUUGGUAUUCUAGCUGUAGA<miR-9,miR-9c,miR-9c-5p>
+CUAAGUAGUUGAUACAAGGGCGA<miR-1002>
+CUCAGACCUUUCUACCUGUCAG<miR-3097-3p>
+UCCAGAAAUUUCUUUUAAGU<miR-4176-5p>
+UAACUUAUGCAAUAUUUCUGACUCA<miR-3297*>
+UGGGGUUUCAAAGCGGUAUGUG<miR-2788>
+UGGCAAGAUGUUGGCAUAGCUA<miR-31>
+UGCCAAAGGAGAGCUGCUCUU<miR399q>
+ACAGUGAAAUUUUGUAGAGA<miR-2170>
+CAAAGACUGCAAUUACUUUUGCG<miR-548u>
+UGAUGUUGAGGCAAAAAUGUAG<miR3949>
+UGUGUUCUCAGGUCACCCCUG<miR398c,miR398b>
+AUAAGUAGUAGUGCCGCAGGUAA<miR-252>
+AUAUAUUAUCAGAUUUUCGGUC<miR-2769>
+CAUCGGGAAUAUCGUGUCCG<miR-425*>
+ACCCUGUAGAUCCGAAUUUGU<miR-10>
+UGAUAUUGUCAUCCAGCACAG<miR-1419b-1*>
+AUGAAUGUGGGAAAUGUAAGAA<miR808>
+CAUGACACUGAUUAGGGAUGUGA<miR-66>
+UCGAUUGGUGUCAGAGCCACG<miR845a*>
+CAAUGUUUCCACAGUGCAUCA<miR-33*>
+UGAGAUGAAAUCUUUGAUUGG<miR1886.2>
+UUUCACUGCGACUGUUCCCAU<miR-2147d-3p>
+UCUCCUCUGGCCGCUCUCCU<miR-2454*>
+UACCACAGGGUAGAACCACGG<miR-140*,miR-140-3p>
+CCCCUGCCCGUUAGCAUUAGC<miR-155*>
+UCGGGCACCGCACCGAAGGAUG<miR-M26*>
+CGGCCCCACGCACCAGGGUAAG<miR-874*>
+AGGAAGUGGGUCCAACUU<mir-M1-1*>
+GAUGAUGAUGGCAGCAAAUUCUGAAA<miR-1272>
+CGAUGUACGCCCUUUCGCAGU<miR-rR1-6*>
+AGUAGAAUAGCAGGCUUAUCACA<miR-958>
+UAAGUGCAUUGCGUGCUCCA<miR-4033-3p>
+UCUGUCCCUCUUGGCCCUUAG<miR-3577>
+AGGAGGCCGUAUCUCCUGCGG<miR-1421i>
+ACAGGAGAGGGAGGAAUCGCAG<miR-936>
+AUUGGUAACACAUACGUCUUUAG<miR-3016>
+CCCGCCUUGCACCAAGUGAA<miR168a*>
+CGUACCGUGAGUAAUAGUGCA<miR-126b*>
+UGUUUGCAGAGGAAACUGAGAC<miR-452,miR-452-5p>
+AGAGUUGGAGGAAAGCAAACC<miR2275a-5p>
+ACGGAAUAUGUAUACGGAAUAUA<miR-3669>
+UGACAACGAGAGAGAGCACGCG<miR535>
+UGUUUGAAUUAGCUGUGAUGUG<miR-2709>
+AUGUUUUGUCGAGAGCUUUCAAA<miR-2492>
+CCAUCUUACUAGUCUUUCUUU<miR844*>
+UGAAAGACACAGGUAGUGAGAU<miR-71>
+UCAGGUACCAAGUGAUUUCUGA<miR-306>
+GUGUGAUUUGUAGCAAAGUGAUA<miR-988*>
+UCACAGUAAAGUAAGCCAUUAUC<miR-135-3p>
+UCCGUACAAACUCUGCUGUG<miR-3678-5p>
+AUCUGGCCUGGUUGCACUCUCU<miR-1420d*>
+UGAGAUCAUUGUGAAAACUAAUC<bantam>
+UUCACUGGAGUUUGUUUCAGU<miR-653*>
+UGUUUUUUCCUUCUGUGAGUUUU<miR-2561>
+AAGUAAUGAGAUUGAUUUCUGU<miR-340>
+UGGAACUUGUUUUGAACAGG<miR-4001d-5p>
+AGGACUACGGACGGGCUGAG<miR-1844>
+CGUACAUUGAUGAUUUAUGAAG<miR-2042*>
+GAAAAGUUCGUUCAGGUUUU<miR-2284j>
+AUCAGCAGUUGUCCAUUGACGUU<miR-2149-3p>
+GUGACAUCACAUAUACGGCAGC<miR-489>
+UGUGUGCUUUGUGACAACGAGA<miR-988*>
+CAUCACUUCAUAGCUAUUUACUCU<miR-2046>
+CAAAAGUAGCAAUUACCUUUGC<miR-570>
+UAAAUGCACUAUCUGGUACGAC<miR-277>
+UGGCAGUGUUUGUUAGCUGGU<miR-449a>
+CGGCCCGGGCUGCUGCUGUUCCU<miR-1538>
+UCGCUCUGAUACCAAAUUGAUG<miR845b>
+GGGGCUGGGGCCGGGGCCGAGC<miR-762>
+AUUUGGCACUUGUGGAAUAAUCG<miR-96b>
+AGAUUGGGCAUAGGUGACUGAA<miR-695>
+UCUACCCUGUAGAUCCGGGCUUUU<miR-993a*>
+CUCUUAGAAUCUUUCUGGUCAG<miR-3418>
+AAAAGUGCUUACAGUGCAGGUAG<miR-106,miR-106a>
+CAGUGCAAUGAUGAAAGGGCAU<miR-130b>
+CACACCUUUACCAGUGCGCUGG<miR-1499>
+UACAGUACUGUGAUAAAUAUUU<miR-101>
+UGCCCGUACUGUGUCGGCUG<miR-273>
+UUCCUAAUGCCUCCCAUUCCUA<miR2118g,miR2118c>
+UGAAUCUUGAUGAUGCUGCAC<miR172e,miR172c>
+UGACAUGUCUUCUAUUUUUAGGGA<miR478f>
+UUUGUGUUGUUUUUUGUUUU<miR-2444>
+CUCUGGAAGGAAGCACUUUCUG<miR-520c-5p>
+UACCUCCUGUCUGACUGAUUUAU<miR-1760>
+UAAGUUGAAAGAAUUGUAGAUUUUGA<miR-3001>
+CAACAAAUCCCAGUCUACCUAA<miR-7-2*>
+UAGGUUUUGUGGUUCUUGUGAAAUA<miR-3326>
+AGGCAGCUGUGAGAGAAGUUG<miR-4127-3p>
+AGGAGGCAGCGCUCUCGGGAC<miR-650b>
+CCUGAAUGUAAUUUAGUGGCA<miR-1368>
+CAGUGCAAUGUUAAAAGGGC<miR-130a>
+UUUUAUACUGUCCAGAUUUGU<miR-2737>
+CAGCUAACAGAGGUGGAACCUUG<miR-1730*>
+UGAGUUGGUUAUACAUUCUU<miR-4003a-5p>
+CAAUCAGAACAUGACACGUGACAA<miR1520g>
+CACGUGGUCUCCUUCUCCAU<miR164d*>
+CUAUGCAAUCCGCUAGCUUAAC<let-7*>
+GUCAUACACGGCUCUCCUCUCU<miR-485,miR-485-3p>
+GUUCUCUACAAGCACUUCACGA<miR395n*>
+AUCAUUUGGCAAAGACAAAG<miR-4125-5p>
+GCUACUUCGGCGGGACAAGAGC<miR903>
+AGCUUUCGAUGGCUAGAAAAUC<miR-2025*>
+UCCUUGAUCUGACGGCUACC<miR2667>
+CUGCUGUGAUGGGAGCUCUG<miR-1558>
+GCCUUCUGACUCCAAGUCCAGU<miR-3557-5p>
+UCACCGGGUGAAAAUUCGCAUG<miR-36>
+UCCCAGGUACAAGAACACAGC<miR900-5p>
+CUCUGUGCUGAAUGUCAAGUUCUGAUU<miR-1944>
+UAUUGCACUCGUCCCGGCCUGU<miR-92c>
+UCCCACAGCUUUAUUGAACUG<miR396g,miR396h>
+ACUGCAUUACGAGCACUUACA<miR-20a*>
+UGAAAUUCACCAUGGUGGGUAAA<miR-3551-3p>
+UGGACGGAAGUGUAAUGAG<miR-748>
+UCCUAACCUUAAGGAUGAG<miR-454*>
+AACAACUAACAUCACUGCCAAG<miR-34b>
+GAUUGUGUUGUUUUCUUUUU<miR-2359>
+CUGAACCCUAGCGAAGUAAAUC<miR4367>
+CGCAAGGGACUACCAUGGCA<miR-3497>
+UGUCCAGUGCCGUAAAUUGCAG<miR-978>
+CUAUACAAUCUACUGUCUUUCC<let-7a-1*,let-7c-2*,let-7e*>
+AGGCAAGAUGCUGGCAUUGCUG<miR-31>
+UGAUUUUUUGUUCGAUGUCAACCUA<miR-3414*>
+ACUGCCAGAUGUAAUGUUGUGC<miR-1987>
+UGUGGAUCUAACUUCCCUUAGU<miR-rL1-20-3p>
+AGGCAAGAUGCUGGCAUAGCUGU<miR-31>
+CGGAAGACUCGCACGUGAC<miR-2147a>
+UGUGCUUGCUCGUCCCGCCUGCA<miR-636>
+GGUUCUUAGCAUAGGAGGUCU<miR-2116>
+ACCGGUCCGUUGUAGGAAUUAGGAA<miR-H7-3p>
+AAUGGCACUAGAUGAAUUCACGG<miR-228>
+GAUCAGGGCCUUUCUAAGUAGA<miR-465c-3p,miR-465b-3p,miR-465a-3p>
+CGGGUUUCGUUAACAGCGGGCU<miR-981*>
+AAUAUGAGUUUAUAUUUACA<miR-4022-3p>
+UCGGACCAGGCUUCAUCCCCC<miR165a,miR165b>
+CUUAACCCACUUGUGAACAAUG<miR-27c*>
+UUAGGGGUGUUUUCCAGUGACU<miR1055>
+AGCACCACGUGUCUGGGCCACG<miR-770,miR-770-5p>
+UGUAGUGUUUCCUACUUUAUGG<miR-142-3p,miR-142*>
+CCUGGACCUUGACUAUGAAACA<miR-BART7*>
+UAGAGAUAUUCGAUAAUGUUUUG<miR-3417>
+UGCAAGAGUUCGCAGACGAA<miR-4173-3p>
+ACUGGACUGAGGGUCAGAAGGC<miR-422a>
+CACAUCACGUAGGCACCAGGUGU<miR-BART4*>
+UUCUGGAAACCUACGUGAGGGA<miR-1299>
+AAUCCUUGCUAUCUGGGUGCUUAG<miR-500*>
+UGAAGUGAUGAUGCCUGAUUA<miR-1799>
+CAUUUGCACCUGGUGGAGCAGC<miR-1392*>
+UACCACAGGGUAGAACCACGGAC<miR-140*>
+CAGCCACAACUACCCUGCCACU<miR-449b*>
+AAAGUUCUGAGACACUCCGACU<miR-148a*>
+CAGUGCAAUAGUAUUGUCAUAG<miR-301,miR-301c>
+ACGCACACCAGGCUGACUGCC<miR-BART11-3p>
+AAGCUUUUUGCUCGCGUUAU<miR-208b-5p>
+UAUGGGAGUUUAUGACUUAGG<miR-3204a*>
+ACUUCACCUGGUCCACUAGCUGU<miR-412>
+UACCCGUAGCUCCUAUCCAUGUU<miR-51>
+GCACCACGAGCUUUUUGGAA<miR-4014-2-5p>
+AGUUAGGAUUAGGUCGUGGAA<miR-1258>
+UCAACUAUGGACUACAUACGGAA<miR1126>
+UACAAAGUAUUUGAAAAGGCGUGC<miR-85>
+UUACAUGUAUCGGGUAGGAG<miR-246*>
+UAGCAGCACAUAAUGGUUUGUU<miR-15a>
+UAGCAGCACGUAAAUAUUGGGU<miR-16b>
+UGAGAUCUUGAUAAACUCGCCU<miR-3050>
+CAGGCUUCUGGCUAUAUUCC<miR-344e*>
+CGAGUCCGAGGAAGGAACUCC<miR1524>
+UUUCCUAUGACGUCCAUUCCAA<miR1859>
+AUGGAGGACUGAGAAGGUGGAGCAGUU<miR-1940>
+GUCCAGUUUUCCCAGGAAU<miR-145>
+ACUCCAUUUGUUUUGAUGAUGGA<miR-136>
+AACCGGCAUCUGUAAUAUAUUAUA<miR1319>
+AUUUCGCUGUGAGUGUUCCC<miR-2174>
+UGAUAUGUUGUUUGAAUGCCCCU<miR-90>
+AACUACUCCCUCCGUCCGAUA<miR1127>
+AGUCUUGGUCAAUGUCGUUCGAAA<miR1517>
+AAAUUGACUCUAGUAGGGAGUC<miR-929>
+AUGGAUGGGGGUGAGGGGUGCA<miR-2392>
+GCCCUAGGGACUCAGUUCUGGU<miR-146b*>
+UAUUGCACUUGUCCCGGUCUU<miR-92b,miR-92a>
+AUGGGUAUAGGUCUAGUAU<miR-279b*>
+GCGUGCUCUUUUUCUUCUGUC<miR1088-3p>
+UGUCUUUUUCCGCUUACUGGCG<miR-316>
+UAUGAUGCAGAUUCUUCAUCU<miR902b-5p,miR902d-5p,miR902g-5p,miR902c-5p,miR902f-5p,miR902e-5p>
+ACUGCAGUGCCAGCACUUCUUAC<miR-106a*>
+UUGAAAGGCUAUUUCUUGGUC<miR-488>
+AGGUUGUCGUGUUGUCUUCUCU<miR-494>
+UUUGGCACUAGCACAUUUUUGU<miR-96>
+AUUCUCCUUCAAUCCAUCUUUGU<miR-1596>
+CAAUCACUAACUCCACUGCCAU<miR-34b>
+GGGGCGAACUGAGAACACAUG<miR398a*>
+GCUGCAUCACGUGUGACCUCC<miR-1421ag,miR-1421t*>
+CAUGGUGAUGAUGUGCUGAAG<miR-1354>
+UCCGACUUUCAAGCGAGCGUAG<miR-63h>
+UAGCAGCACAUCAUGGUUUGCA<miR-15b>
+UGCAACGAACCUGAGCCA<miR-891a>
+CUGCGGAUACAACCAAACACGG<miR-2448*>
+GCCUCAUUCUAUGGGUUGUUAU<miR-67-5p>
+ACCCUAUCGAUAUUGUCUCUGCU<miR-454*>
+UUCUGGCAGUUGGCCGGCCCAUC<miR-2533>
+UAUCUUUUUCCAGAGCCGCGGU<miR-M44-1>
+UGUAAACAUCCUACACUCUCGG<miR-30c>
+UAUACAGAUUCGAGUAUGCAU<miR-1390>
+CCGUUGAGUGCAGCGUUGAUG<miR397>
+AGGUUGACAUACGUUUCCC<miR-563>
+UAGCAGCACAUCAUGGUUUACA<miR-15b>
+GGCAGGAGGGAAGCAGAGCUUAGA<miR-1762>
+UGAGAACCAUGUCUGAUCAGAG<miR-589>
+UCAAAUGCUCAGACUCCUUG<miR-105-2,miR-105b>
+UUAGAUGCCGUCAGGGAAAGAU<miR-M24>
+AAGAACUUAAUAUAACUUUAAAGC<miR2921>
+UGUAACAGCCGCUCCAUGUGGA<miR-194b>
+UUUCAUUCAAGCCGUCUUUUCU<miR-1422l>
+UGAUUGUCCAAACGCAAUACA<miR-219>
+UGGCACAGGGUCCAGCUGUCGGC<miR-2320>
+GCAUGGAAACGUCCUGGGAAA<miR-M13>
+AGGUGGAUGUUAGUGCAAUUUA<miR-3479-5p>
+UGAAAGAUCAUAGAAUGCGAAA<miR-2759>
+CUUUGUCUACAAUUUUGGAAA<miR158a*>
+CUAAGUCAGCAACUUGAUUCCAGCAAUUG<miR-284>
+UGCCAAAGGAGAGUUGCCCUG<miR399d,miR399p,miR399a,miR399e,miR399j,miR399c,miR399l,miR399i,miR399b>
+CGUCGAGGAAAGAGAGAGAGAU<miR-3208>
+UCACACCUGCCUCGCCCCCC<miR-1228>
+UCACAGGAUUUUUGAGUGUUGC<miR-249>
+UUCCUCCUGGGUACAACUCUGC<miR-1680*>
+ACAAGUCUUUGUAUAGCUUAU<miR-2154*>
+ACUGCUGAGCUAGCACUUCCCG<miR-93*>
+UUGCUGCCUCAAGCUUGCUGC<miR444a.1,miR444d.1,miR444,miR444b>
+UUUUCUUCUUCUUCUUGCACA<miR838>
+AGUCAGCAUUGGUGGUUU<miR-752-3p>
+UAAGUGCUUCCAUGUUUGAGUGU<miR-302d>
+ACAAAAUCCGUCUUUGAAGA<miR866-3p>
+UAAUCUCUGCAGGCAACUGUGA<miR-216b>
+CUGUGGGCUCAGCGCGUGGGG<miR-4322>
+UGCAGAGAUAGGGACGCGCUUA<miR4340>
+UCAUAUGUAGUAUUUUACCUAUGU<miR-3424>
+UUUUGUGACCGACACUAACGGGUAAU<miR-274>
+CUGUGUGAGGUUAGACCUAUC<miR-2188*>
+CAGAGGAAGCAGCACUUGUACC<miR4407>
+AAGAGUUUGUUCGGGUUUCUC<miR-2284w>
+UCCAAAGGGAUCGCAUUGAUCC<miR393a,miR393b>
+ACUUUAACAUGGGAAUGCUUUCU<miR-302b*>
+AAGGUCCAGCCUCAUAUGUCCU<miR-2188>
+AGAAGAGAGAGAGUACAGCCU<miR529>
+UGGGAACCUGACGGGCCUCCA<miR3710>
+UGCCAAAGGAGAUUUGCUCGU<miR399d>
+AGGACCUCACCUAACAGCUUAAGC<miR481e>
+UGGCUGCUAGGCUCCUGGGUG<miR2094-5p>
+UUUCCUAUGCAUAUACUUCUUU<miR-202*>
+GAUAUAACCAAAGCCCGACUGU<miR-344b-1-3p>
+UCCCUCCCCCUCACUGCA<miR-3541>
+UCAAUGCUCUCUGGAGCUUCU<miR1031b,miR1031a>
+CGCGCUAAGCAGGAACCGAGAC<miR-275*>
+CGGAGAGUAAUUUCAUGUU<miR-281*>
+ACUUGGUCGACAAUCUAAUAUU<miR-230*>
+UGAAACUUCUUCGGAACAGG<miR-4000e-5p>
+CACCGGGUUAACAUCUACAG<miR-42>
+AGGCAAGAUGCUGGCAUAGCU<miR-31>
+AAGCAGCAAGGACAGUGUUUGG<miR-1494>
+UGUGGGUGGCAAACAAAGACGACA<miR851>
+UCUGUGACCUCAUUUACCUCC<miR-1664>
+CCCAAUACACGGUCGACCUCUU<miR-323b-3p>
+UUAAGAACCCUCAGUGCAAUC<miR-M1-10*>
+CCUGCAUUGUUGGAUUGUGGA<miR2084>
+AUUGACACCUCUGUGAGUAGA<miR-514>
+AACUGGCCCACAAAGUCCCGCUUU<miR-193b>
+GGCAUAAUUCAAGAUAUUCGAU<miR-1b*>
+GAGUAAAAAUGUGAACCGAAU<miR2662>
+UUCCGGUGGUGAGGAAGAUAG<miR1220a,miR1220b>
+UCACGGAAAACGAGGGAGCAGCCA<miR1868>
+UGUAUUUACGUUGCAUAUGAAAUGAUA<miR-280>
+UUUGGUUUCCUCCAAUAUCUCA<miR2275a,miR2275b>
+UCUAUUUUUCUACGGGAACUUCUC<miR-3226>
+CAGCCACGCUACUGUCACUGGU<miR-1627>
+GGCGCUUGUUGGAGUACACUU<miR-305*>
+UAGGACACAUGGUCUACUUCU<miR-1197>
+UAUGGCUUUUACAUUCCUGUGU<miR-132-5p>
+AAAUCUCAUCCUAAUCUGGUAGCA<miR-259>
+UGAUUGGUACGUCUGCAGGUAG<miR-509-3p>
+ACCCGUUCUGGAAUUGCGCGG<miR1071-3p>
+ACUCUAGCUGCCAAAGGCGCU<miR-1251>
+CCUGAACUAGGGGUCUGGAGG<miR-345>
+UGACUAGAGCCUAUUCUCUUCU<miR-247>
+AACGCACUUCCCUUUAGAGUGU<miR-521>
+AAACUUGUAAGAUGGUGACAUU<miR4348>
+UGAGAGGCUGUCAGUUUGUGGGG<miR-1642>
+UAGCAGCACAUCAUGGUUUA<miR-15b>
+UAAUCUUUGUAAUCCUGUU<miR-4217-3p>
+CUGCGGACGGGUGGGCGGGCAGGCC<miR-3077*>
+UUAAAGUUGUAGUUUGGAAAGU<miR-991>
+AUCAUGCAUGACAGCCUCAUUU<miR167a*>
+UUCCACGGCUUUCUUGAACUG<miR396f>
+ACGGGAAUGGUCACUUACAACU<miR-2757>
+GUGGGCGGUGCGGGGCGGCG<miR-1777>
+AGGAUUGCAGCAGCAACGGGGC<miR1172.1>
+UAAUUGCUUCCAUGUUU<miR-302f>
+CAGUUGACGUACGUACGGAUUGAC<miR4360>
+UGGUUGACCAGAGAGCACACG<miR-758*>
+UAACACUGUCUGGUAACGAUGU<miR-200a>
+CAAAGUCAGCAACUUGAUUCCAGCAAUUG<miR-284>
+CUAUCCUGGAAUGCAGCAAUGA<miR-687>
+UCCGUCUCAGUUACUUUAUAGCC<miR-340-3p,miR-340>
+UGCUUGUACUUAUUCUGGUGAC<miR-3580-5p>
+GUCAAUUGAUAAUGGGCCCCA<miR-87c*>
+UAGCACCAUAUAAAUUCAGUGU<miR-83>
+UGUGAUAUUGGUCCGGCUCAUC<miR479>
+UGAUUGACAUUUCUGUAAUGG<miR-509-3p>
+CCUCGUUCCAUACAUCAUCUAG<miR1507>
+UGACAGGAAUGCAUUGGUGUU<miR1092>
+UGCUGAGCGUUGGCUGCGCUGCG<miR-1724>
+UGAGGUAGUAGUUAGAA<miR-1961>
+ACUUUAACAUGGAAGUGCUUUC<miR-302b*>
+CGCGCUACUCCGGCGCCAGGACU<miR-275*>
+UGUGAUAUUGGUUCGGCUCAUC<miR479>
+AGGCCUAGAUUACAUUGGAC<miR2088a>
+CGUGUAUUUGACAAGCUGAGUUG<miR-223*>
+UAGCUUGUCCUGGGAUUCCGU<miR3457>
+AGCUAGAAAGGUGACAUAAAAUC<miR-60*>
+GACCCGUAGAUCCGAACUUGUG<miR-100>
+AGACCUACUUAUCUACCAACAGC<miR-1839-3p>
+GGCUUGUUUUCCGUUGCCUGCG<miR-1788-5p>
+UGAGUUGGCCAUCUGAGUGAG<miR-571>
+UUUCUUAAGUCAAACCUUUU<miR1435b>
+UGCGUAGGCGUUGUGCACACUGU<miR-242>
+UACAAAGUAUUCGAAAAGGCGUGC<miR-85>
+UAUGGGGGGAUUGGGAAGGAAU<miR482b>
+AGGAAUGUUCCUUCUUUGCC<miR-613>
+UGACUAGAUCUACACUCAUCA<miR-279b>
+CACCCGUAGAACCGACCUUGCG<miR-99b>
+CUUCCGCCCCGCCGGGCGCCG<miR-718>
+AAUGGCACUGAAAGAAUUCACGGG<miR-263a>
+CACUGUGAUGGAGCGUUCUGACC<miR-2362>
+UAUGUAGCCAAAGUUUGGGUCC<miR-1999>
+AGCUGUCAGGGGUUACAUG<miR-M1-11-5p>
+GCUUGUUGGUAAUUUUGCAUCU<miR-2027*>
+UGUAUUCAUACUGUCUGAGCUG<miR-4185-3p>
+UUGAGGGGACUGAGGUGCGGAG<miR-2422>
+AUCAUAGAGGAAAAUCCACGU<miR-376a>
+GUUUGCAUGGGUGGGCCUUGUCU<miR-557>
+CCACAAUGAAGAUAGAAGAUGGCU<miR-1481>
+AGUUUUCCUCGGUAGUUAACU<miR2629a,miR2629f,miR2629d,miR2629c,miR2629e,miR2629g,miR2629b>
+UCUCAGCUACAUCGGUGUAAAUC<miR-1467>
+AGCAGCAUUGUACAGGGCUAU<miR-107>
+CCAUUGAGUGCAGCGUUGAUG<miR397b>
+UCACCGGGUAUGAAUCAGUUAG<miR-39>
+CUCACAAAGUGGUUGUCGUAUG<miR-2a-2*>
+UCUCUGGGCCUGUGUCUUAGGC<miR-330,miR-330-5p>
+ACCCCGCUUAAUCGACCCAC<miR-4109-5p>
+CCUCUGGGCCCUUCCUCCAGU<miR-326>
+AAAGUGCUUCCACUUUGUGUGC<miR-291a-3p>
+AAUAAUACAUGGUUGGUCUUU<miR-369>
+UGGUUCGUCACAAGGGCAAUUCU<miR-312*>
+UAGCCAAGGAUGAUUUGCCUG<miR169o>
+CAUGCCUUGAGUGUAGGACCGU<miR-532,miR-532-5p>
+UCGUACCGUGAGUAAUAAAGC<miR-126>
+GAGCCUUUGGCGGCUGUGAUAU<miR-13*>
+AAGCUGCCAGUUGAAGAACUG<miR-22-3p>
+UCCAUAUGUUGUUUAAGUGGUCAC<miR-3237>
+GCGUGCAUGGUGCCAAGCAUA<miR160c*>
+GAGAGAGAAAUGAGAACU<miR-1328>
+UAUAAAAUGAGGGCAGUAAGAC<miR-3163>
+AUACAUACACACACACAUACAC<miR-466b-1*>
+CAUUCUCGUUUCCUUCCCU<miR-698>
+GCAGUCCAUGGGCAUAUACAC<miR-455-3p,miR-455>
+CCCGCAUUGCCAUCGGCGCCUG<miR-2701>
+UAGCGAAGGAUGACUUGCCUA<miR169y>
+UGUGUUGAAAAUCGUUUGCAC<miR-287>
+CUUGAUAGUGAGAAAGACCCA<miR3445.2>
+UUUUGCAAAUUUCAGAUUCAUU<miR-2700>
+UUGUGUGGUUGUUGUUUUCCU<miR-2423>
+CCCCAGGGCGACGCGGCGGG<miR-1915>
+AGUGGUCCUAAACAUUUCAC<miR-3545-5p>
+UAUUUUUGCUCGGACAUUUAUGU<miR-2542>
+CGGCGUCUGGACGUUUGGUUUU<miR-3496>
+GUGGUUUCUUAUUCCUUUUU<miR-2337>
+UGGGGAGCUGAGGCUCUGGGAGUG<miR-939>
+CAACUACACGUUGGGCGCUCGA<miR1423b>
+UGAAAGACAUGGGUAGUGAGAUU<miR-71>
+ACUGUGGAGGGUUUCUAUGU<miR-3558-3p>
+UGAGGUAGUAGUUUGUACAGUU<let-7g>
+AGGUCGUGACUUGUGCCCGUUUG<miR-92b*>
+CACCACGAGCCCUACCACGCGGUAG<miR-1905a>
+AGAUAUGUUUGAUAUUCUUGGUUG<miR-190,miR-190*>
+AUCAGCCUCGCUGUCAAUACG<miR-2008>
+UUGUGCAGUGGCCAGCAGCUGC<miR-210-as>
+UGGCAGUAUGCGCAAGUUAG<miR-4008a-5p>
+UUGUGUAUCUGAGUGUUUCU<miR-4047-3p>
+UUACUGUUGAUGUCAGCCCCUU<miR-2010>
+CGGCCCCACGCACCAGGGUAA<miR-874*>
+CGGCAGUGAGGGAGGAUUUGC<miR1091>
+UUACUGGUCAUCGUCUUAACUU<miR-3035>
+UAUUGCACUUGAGACGGCCGAA<miR-312>
+AUUGGGUUUGGUUCGGGCGGAU<miR2616>
+GCUCACUCUCUAUCUGUCACC<miR156f*>
+AGACUUCCCAUUUGAAGGUGGC<miR-617>
+UGUUGUUUGAGUGCAAACCG<miR-2256>
+GUGCAUUGUAGUUGCAUUGC<miR-33>
+UGAACAAGCUUCCGCAAGUGCCA<miR-3409>
+CAACGAGGAGGCCGGGACCA<miR1846e>
+UUGUCGCAGGUAUGGAUGUAUCUA<miR1136>
+CAGGCCAUAUUGUGCUGCCUCA<miR-15a*>
+UGUGCGACAGAGAUAGCGCUCG<miR-2798>
+UAUGACACUGAAGCGAGAGUGU<miR-63b>
+UGCAUUACUGUUUCUUCGACUCCG<miR-3316>
+CAAAUUCGUGUCUUGGGGAAUA<miR-10a*>
+UAAGACAUCAGCUAUAAGCUA<miR2660a,miR2660b>
+AGGAGGCAGCGCUCUCAGGAC<miR-650,miR-650a>
+ACUAUGUUCUUCCAGGACAGAAC<miR-567>
+CCACAAUGAAAGUAGAUGUCCG<miR-4045-5p>
+CACAGUGGAGGUAAAGAUUG<miR-4011a-5p>
+GAGGGACUUUCAGGGGCAGCUGU<miR-365-5p>
+CUGGAGAGCAGGAAGAGCUGUGU<miR-1270>
+GCACAAAUAUGCACUACAAAC<miR1044-5p>
+CGAUGAUUGUCCAACUGGUUU<miR-36c*>
+AUCCCCAGAUACAAUGGACAA<miR-2355-5p>
+GUCCUUUCCAACAGGUUUC<miR-4000d-3p>
+UUUAAAUCAUGCAGCUGUUGA<miR-1781>
+UGGCUUAGUGCAGCUCGGGGA<miR168>
+CUUGUUAAAAAGCAGAUUCU<miR-544*>
+CCUGUUGAACAACUGAACCCAA<miR-582-3p>
+AAAACUGCAUCUGGAUUGAUC<miR-1422i>
+AUAAAGCUAGGUUACCAAAGACA<miR-79>
+UAGCAGCACAUCAUGAUUUGCA<miR-15b>
+GGGGAUGGGCUGGCGCGCGG<miR-UL70-3p>
+AGAGCUUCCUUGAGUCCAUUC<miR319a*>
+GAGGGAUUUUGCGGGAAUUUCACG<miR1866-5p>
+CGUCAACCAUCCAGCUGUUUGA<miR-2483*>
+CCAUGGAUCCCCAGGUGGGU<miR-490>
+UGUUUGUGCACUUCAGGGAAUCUAU<miR-3328>
+GGCGACCCAUACUUGGUUUCAGU<miR-551b>
+GGAUUUUACAUUUUUGCAUGUUGC<miR-3318>
+AACUAUUGGUCACUGCACAGGAA<miR-3286*>
+GGGUUAUGGAAUGGGUUUUACC<miR813>
+UCAGAUCCUUUUUCCGGCAUUAG<miR-2557>
+UUCUGCAUCAGGAACUGAUUGGA<miR-217>
+UUACACAGUACCGAUAUUGUGA<miR-2024a>
+UAAAUGCAUUUAUCUGGCCAAG<miR-277d-3p>
+UACCCUGUGGUACCGAGCUGUGUCU<miR-57>
+CAGGCUGGUUAGAUGGUUGUCA<miR-456>
+GUGAAAUUUAUUUAUAGGCAGA<miR-2565*>
+UACUGCAGACAGUGGCAAUCA<miR-509-5p>
+AUCGCUGCGGUUGCGAGCGCUGU<miR-639>
+ACUCCUUACCCCUGGCCGUC<miR-2330*>
+UAUCGAAUGUUCCAGACUUUUAG<miR-2541*>
+AAUCCACCUGGGCAAGGAUUC<miR-502b>
+UAUGACACUGACCCCUCAAUGCGG<miR-65>
+UUUUUGCGAUGUGUUCCUAAUA<miR-450a>
+UAUUGCACUCUCCCCGGCCUGA<miR-235>
+UCACCAUGACCCUGAUCCCACU<miR-1240>
+UGCGGCGAGCCAAGACCAUA<miR3467*>
+UUUUGUGACCGACACUAACGGGUAUU<miR-274>
+AAGAGGAAGAAAUGGCUGGUUCUCAG<miR-3916>
+UGGCUCUGUGAGGUCGGCUCA<miR-1842>
+UAACUCAGUAAGAUCACAGGCC<miR-2685>
+UGGGGACUCGAAGACGAUCAUAU<miR2916>
+AGCUCUGAUACCAUGUUAGAUU<miR1863>
+UUGGAUUGAAGGGAGCUCCA<miR159a>
+UGAAAUAGGUCUGCUAACUA<miR-4044-3p>
+CGUGUCUGUGUGUAUGUUGCAG<miR-2580>
+UCAGGUACCUGAAGUAGCGCG<miR-275>
+GGUCAAGAAAGCUGUGGGAAG<miR396f*>
+CUGCAAUGUAAGCACUUCUUAC<miR-106a*>
+UCGCACGCGCCCGGCACAGACU<miR-H2*>
+AGGAGAUCGGUGGUAGAUUGU<miR-3500>
+AGUGGUUCUACCCUAUGGUAG<miR-140>
+GAUUGUAAUGCGAUGGCUC<miR1153.1*>
+UGGAAUGUUGUGAAUAGUGUC<miR-1c>
+AACCAGGCUCUGAUACCAUG<miR1511>
+ACACUAAAGGACCUAAACUAAC<miR840>
+CCAGUGUGGCUCAGCGAG<miR-4302>
+ACCAGGAGGCUGAGGUCCCUUA<miR-665>
+ACCUCCCUCGAAGGCUUCCAA<miR477a>
+UAAGGCGAGAUGAGGUCUUUGGACA<miR-1468>
+ACUGCAGUGUGAGCACUUCUGG<miR-20b-3p>
+UUUGUCAUAGGAUUACACACG<miR1060>
+UUAGUACUUGGGUUGAUAAAGA<miR-959*>
+GAUCAUGUGGCAGUUUCAUU<miR167j*>
+UACUAUGAGAAUCUCGCGGCC<miR1214>
+CUUAUGCAAGAUUCCCUUCUAC<miR-491-3p,miR-491,miR-491*>
+GCAGCAGAGAAUAGGACUACGUC<miR-922>
+UUGGGAGCUCGAUGAGAUCGA<miR3444>
+UGAACACAGCUGGUGGUAUCCAGU<miR-317>";
+	$mirbase=~s/\n//g;
+   my @tmp=split(">",$mirbase);
+   my %mirbase;
+   my @dat;
+   foreach (@tmp){
+	  @dat=split("<",$_);
+	  $mirbase{$dat[0]}=$dat[1];
+   }
+   return %mirbase;
+}
