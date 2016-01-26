@@ -3,6 +3,7 @@
 miRPara_model_trainer.pl was designed to train the miRPara models based on newly released miRBase data. It supports miRBase 13.0 or higher. Basically, it will: * extract the experimentally verified pri-miRNAs * calculate the parameters for each pri-miRNA * group the parameters into overall, sub-groups and species name * create 20 levels negative parameters for each group * train the models
 
 The selection of miRPara_model_trainer.pl have to match the miRPara.pl version: 
+
 |Model Trainer Version|miRPara Version| 
 |:--------------------|:--------------| 
 |3.0 or above |6.0 or above | 
