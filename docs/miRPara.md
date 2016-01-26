@@ -103,10 +103,12 @@ miRPara.pl does not required to be copied to $PATH. If you did so, do copy the m
 The _mature.fa_ and _organisms.txt_ was required for the miRPara.pl 6.0 or above. miRPara.pl will check the $PATH and automatically download the files if they were not exist.
 
 The selection of miRPara_model_trainer.pl have to match the miRPara.pl version: 
-|Model Trainer Version|miRPara Version| 
-|:--------------------|:--------------| 
-|3.0 or above |6.0 or above | 
+
+|Model Trainer Version|miRPara Version|
+|:--------------------|:--------------|
+|3.0 or above |6.0 or above |
 |2.3 or below |5.3 or below |
+
 The previous models do not fit for miRPara.pl 6.0 or above!
 
 **miRPara version 6.0 or above**
@@ -245,11 +247,14 @@ Note: need BIG RAM (>16G, depend on the input data size), if your computer do no
 
 The predicted result named as "＊.out". It is a tab-delimited text file with following columns:  
 
-Column NameExample 1Example 2Description priid lin:1-94 lin:1-94 :- priseq augcuuccggcCUGUUCCCUGAGACCUCAAGU  
-gugaguguacuauugaugcuucacaccugggcucuccggg  
-uaccaggacgguuugagcagauaugcuuccggccuguUCCCUGAGACCUCAAGU  
-GUGaguguacuauugaugcuucacaccuggg  
-cucuccggguaccaggacgguuugagcagauUpper case indicated the mature miRNA sequences miid lin:1-94:12_21lin:1-94:16_20:underline miseq CUGUUCCCUGAGACCUCAAGUUCCCUGAGACCUCAAGUGUGmiRNA sequence strand 5P 5P location of the miRNA SVM_probability0.823885 0.984632 SVM Probability, the higher the better miRBase NA lin-4-5p Hit in miRBase
+|Column Name | Example 1 | Example 2 | Description |
+|------------|-----------|-----------|-------------|
+| priid | lin:1-94 | lin:1-94 | |
+| priseq | augcuuccggcCUGUUCCCUGAGACCUCAAGUgugaguguacuauugaugcuucacaccugggcucuccggguaccaggacgguuugagcagau | augcuuccggccuguUCCCUGAGACCUCAAGUGUGaguguacuauugaugcuucacaccugggcucuccggguaccaggacgguuugagcagau | Upper case indicated the mature miRNA sequences |
+| miid | lin:1-94:12_21 | lin:1-94:16_20 | underline 
+| miseq | CUGUUCCCUGAGACCUCAAGUU | CCCUGAGACCUCAAGUGUG |
+| miRNA sequence strand | 5P | 5P | location of the miRNA |
+| SVM_probability | 0.823885 | 0.984632 | SVM Probability, the higher the better miRBase NA lin-4-5p Hit in miRBase |
 
 * * *
 
