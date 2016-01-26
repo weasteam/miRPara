@@ -4,16 +4,26 @@
 
 miRPara was written in perl and developed under Linux. We suggest to run miRPara under linux. But it should be able to run under Mac OS and Windows if all third-party software packages were installed.
 
-Please Cite:
+**Please Cite:**
 
 MiRPara: a SVM-based software tool for prediction of most probable microRNA coding regions in genome scale sequences. Wu Y., Wei B., Liu H., Li T., Rayner S. BMC Bioinformatics. 2011 Apr 19; 12(1):107
 
 **Required Packages**
 
-_Version 6.0 or above_ * Getopt::Long (CPAN) * threads (CPAN) * threads::shared (CPAN) * Cwd (CPAN) * File::chdir (CPAN) * UNAFold (http://mfold.rna.albany.edu/?q=DINAMelt/software'>download) * ct2out (http://code.google.com/p/mirpara/downloads/detail?name=ct2out.tar.gz&can=2&q='>download) * libsvm ([http://www.csie.ntu.edu.tw/~cjlin/libsvm/](http://www.csie.ntu.edu.tw/~cjlin/libsvm/))
+_Version 6.0 or above_ 
 
-Copy UNAFold.pl, ct2out, svm-predict to $PATH ```
+* Getopt::Long (CPAN) 
+* threads (CPAN) 
+* threads::shared (CPAN)
+* Cwd (CPAN) 
+* File::chdir (CPAN) 
+* UNAFold (http://mfold.rna.albany.edu/?q=DINAMelt/software'>download) 
+* ct2out (http://code.google.com/p/mirpara/downloads/detail?name=ct2out.tar.gz&can=2&q='>download) 
+* libsvm ([http://www.csie.ntu.edu.tw/~cjlin/libsvm/](http://www.csie.ntu.edu.tw/~cjlin/libsvm/))
 
+Copy UNAFold.pl, ct2out, svm-predict to $PATH
+
+```
 # Install the packages from CPAN
 
 # See the instruction at [http://perl.about.com/od/packagesmodules/qt/perlcpan.htm](http://perl.about.com/od/packagesmodules/qt/perlcpan.htm)
@@ -67,10 +77,14 @@ $ ct2out
 # copy svm-predict to the path, you might need to be root to do so
 
 $ sudo cp svm-predict /usr/bin/
-
 ```
 
-_Version 5.3 or below_ * Getopt::Long * Algorithm::SVM (http://code.google.com/p/mirpara/downloads/detail?name=algorithm_SVM_install_fix.pdf&can=2&q='>click here if you have install problem) * Cwd * UNAFold (http://mfold.rna.albany.edu/?q=DINAMelt/software'>download) * ct2out (http://code.google.com/p/mirpara/downloads/detail?name=ct2out.tar.gz&can=2&q='>download)
+_Version 5.3 or below_ 
+* Getopt::Long 
+* Algorithm::SVM (http://code.google.com/p/mirpara/downloads/detail?name=algorithm_SVM_install_fix.pdf&can=2&q='>click here if you have install problem) 
+* Cwd 
+* UNAFold (http://mfold.rna.albany.edu/?q=DINAMelt/software'>download) 
+* ct2out (http://code.google.com/p/mirpara/downloads/detail?name=ct2out.tar.gz&can=2&q='>download)
 
 Copy UNAFold.pl, ct2out to $PATH
 
@@ -88,11 +102,17 @@ miRPara.pl does not required to be copied to $PATH. If you did so, do copy the m
 
 The _mature.fa_ and _organisms.txt_ was required for the miRPara.pl 6.0 or above. miRPara.pl will check the $PATH and automatically download the files if they were not exist.
 
-The selection of miRPara_model_trainer.pl have to match the miRPara.pl version: |Model Trainer Version|miRPara Version| |:--------------------|:--------------| |3.0 or above |6.0 or above | |2.3 or below |5.3 or below | The previous models do not fit for miRPara.pl 6.0 or above!
+The selection of miRPara_model_trainer.pl have to match the miRPara.pl version: 
+|Model Trainer Version|miRPara Version| 
+|:--------------------|:--------------| 
+|3.0 or above |6.0 or above | 
+|2.3 or below |5.3 or below |
+The previous models do not fit for miRPara.pl 6.0 or above!
 
 **miRPara version 6.0 or above**
 
-``` Usage: miRPara.pl [Options] file [File]
+```
+Usage: miRPara.pl [Options] file [File]
 
 Options: -v, --version -h, --help -s, --species=species group name (defaults as overall) or species short name or path of a model file: /home/xxx/miRPara/model/hsa_10.model -c, --cutoff= (defaults to 0.8) -l, --levels=<1..20>(defaults to 1) -p, --prilengthlimit= (defaults to 60) -f, --foldlength= (defaults to 500) -o, --overlaplength= (defaults to 150) -t, --threads= (defaults to 1) --pmt, --Only calculate the parameters without further prediction
 
@@ -125,10 +145,11 @@ _Examples:_
 10) Only calculate the X.pmt files. skip the prediction process `perl miRPara.pl --pmt test.fasta`
 
 11) Repredict the result by change the cutoff or model level. `perl miRPara.pl -c 1 -l 20 test.pmt`
-
+```
 **miRPara version 5.2 and 5.2 above**
 
-``` Usage: miRPara.pl [Options ] file [File ]
+```
+Usage: miRPara.pl [Options ] file [File ]
 
 Options: -v, --version -h, --help -n, --name= -s, --species=species group name (defaults as overall) or species short name or path of a model file: /home/xxx/miRPara/model/hsa_10.model -c, --cutoff= (defaults to 0.8) -l, --Levels=<1..20>(defaults to 1) -p, --prilengthlimit= (defaults to 60) -f, --foldlength= (defaults to 500) -o, --overlaplength= (defaults to 150) -t, --cores= (defaults to 1) --pmt, --Only calculate the parameters without further prediction
 
@@ -163,9 +184,9 @@ _Examples:_
 11) Repredict the result by change the cutoff or model level.  
 
     perl miRPara.pl -c 1 -l 20 test.pmt
-
+```
 **miRPara version 5.2 or below**
-
+```
     Usage: miRPara.pl [Options ] file [File ]
 
     Options:
@@ -215,7 +236,7 @@ Note: need BIG RAM (>16G, depend on the input data size), if your computer do no
 7) Repredict the result by change the cutoff or model level.  
 
     perl miRPara.pl -c 1 -l 20 test.pmt
-
+```
 * * *
 
 # Result
