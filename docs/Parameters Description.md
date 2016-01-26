@@ -6,8 +6,9 @@ overall 76 parameters generate from previous research work.
 
 An example of each parameter is attached in the next section.
 
-|MIID|The ID of miRNA, usually like this "three letters of species abbreciation-MIR-serial number"|
+|Name|Description|
 |:---|:-------------------------------------------------------------------------------------------| 
+|MIID|The ID of miRNA, usually like this "three letters of species abbreciation-MIR-serial number"|
 |PRIID|The ID of pri-miRNA, usually like this "three letters of species abbreciation-mir-serial number"| 
 |MISEQ|The sequence of miRNA | 
 |MISTR_1|The first strand of miRNA duplex secondary structure | 
